@@ -127,16 +127,54 @@ function applyDaysInStock(vehicles, vinHistory, today) {
     for (const vehicle of vehicles) {
         if (!vehicle.vin) continue;
 
+        // Get the current price as a number for comparison
+        const currentPrice = parseFloat(
+            String(vehicle.dealerPrice || vehicle.msrp || '').replace(/[$,]/g, '')
+        ) || null;
+
         if (vinHistory[vehicle.vin]) {
-            // VIN seen before — calculate days on lot
-            const firstSeen = new Date(vinHistory[vehicle.vin].firstSeenDate);
+            const record = vinHistory[vehicle.vin];
+
+            // ── Days on lot ──
+            const firstSeen = new Date(record.firstSeenDate);
             const msOnLot = today - firstSeen;
-            vehicle.firstSeenDate = vinHistory[vehicle.vin].firstSeenDate;
+            vehicle.firstSeenDate = record.firstSeenDate;
             vehicle.daysOnLot = Math.floor(msOnLot / (1000 * 60 * 60 * 24));
+
+            // ── Price history tracking ──
+            const priceHistory = record.priceHistory || [];
+            const lastEntry = priceHistory[priceHistory.length - 1];
+            const lastPrice = lastEntry ? lastEntry.price : null;
+
+            // Only add a new entry if price changed since last run
+            if (currentPrice !== null && currentPrice !== lastPrice) {
+                priceHistory.push({ date: todayStr, price: currentPrice });
+                record.priceHistory = priceHistory;
+            }
+
+            // Attach price history summary to vehicle record
+            vehicle.priceHistory = priceHistory;
+            vehicle.originalPrice = priceHistory.length > 0 ? priceHistory[0].price : currentPrice;
+            vehicle.currentPrice = currentPrice;
+            vehicle.priceDrop = (vehicle.originalPrice && currentPrice)
+                ? vehicle.originalPrice - currentPrice
+                : 0;
+            vehicle.priceDropCount = priceHistory.length > 1 ? priceHistory.length - 1 : 0;
+            vehicle.lastPriceChangeDate = priceHistory.length > 1
+                ? priceHistory[priceHistory.length - 1].date
+                : null;
+
         } else {
             // New VIN — record today as first seen
             vehicle.firstSeenDate = todayStr;
             vehicle.daysOnLot = 0;
+            vehicle.priceHistory = currentPrice ? [{ date: todayStr, price: currentPrice }] : [];
+            vehicle.originalPrice = currentPrice;
+            vehicle.currentPrice = currentPrice;
+            vehicle.priceDrop = 0;
+            vehicle.priceDropCount = 0;
+            vehicle.lastPriceChangeDate = null;
+
             vinHistory[vehicle.vin] = {
                 firstSeenDate: todayStr,
                 dealer: vehicle.dealer,
@@ -145,6 +183,7 @@ function applyDaysInStock(vehicles, vinHistory, today) {
                 year: vehicle.year,
                 trim: vehicle.trim,
                 condition: vehicle.condition,
+                priceHistory: currentPrice ? [{ date: todayStr, price: currentPrice }] : [],
             };
         }
 
@@ -175,6 +214,9 @@ function detectSoldVehicles(vinHistory, currentVins, today) {
             // VIN was in history but not in today's scrape — mark as sold
             const firstSeen = new Date(record.firstSeenDate);
             const daysOnLot = Math.floor((today - firstSeen) / (1000 * 60 * 60 * 24));
+            const priceHistory = record.priceHistory || [];
+            const originalPrice = priceHistory.length > 0 ? priceHistory[0].price : null;
+            const finalPrice = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1].price : null;
             soldVehicles.push({
                 vin,
                 dealer: record.dealer,
@@ -188,6 +230,11 @@ function detectSoldVehicles(vinHistory, currentVins, today) {
                 daysOnLot,
                 ageBucket: getAgeBucket(daysOnLot),
                 status: 'Sold/Removed',
+                originalPrice,
+                finalPrice,
+                totalPriceDrop: (originalPrice && finalPrice) ? originalPrice - finalPrice : 0,
+                priceDropCount: priceHistory.length > 1 ? priceHistory.length - 1 : 0,
+                priceHistory,
             });
             // Mark as sold in history so we don't re-report it
             vinHistory[vin].soldDate = todayStr;

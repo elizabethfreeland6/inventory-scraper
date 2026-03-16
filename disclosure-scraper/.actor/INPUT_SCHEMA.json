@@ -1,0 +1,32 @@
+{
+    "title": "Dealer Disclosure Scraper Input",
+    "description": "Configure which dealers to scrape for fee disclosures and financing terms.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "dealers": {
+            "title": "Dealers to Scrape",
+            "type": "array",
+            "description": "List of dealer names to scrape. Leave empty to scrape all dealers.",
+            "default": [],
+            "editor": "stringList",
+            "example": ["Walker Chevrolet", "Serra Chevrolet"]
+        },
+        "openaiApiKey": {
+            "title": "OpenAI API Key",
+            "type": "string",
+            "description": "Your OpenAI API key for GPT-powered disclosure parsing. Can also be set as OPENAI_API_KEY environment variable.",
+            "isSecret": true,
+            "editor": "textfield"
+        },
+        "pagesToSample": {
+            "title": "Pages to Sample Per Dealer",
+            "type": "integer",
+            "description": "Number of vehicle detail pages to scrape per dealer. More pages = more accurate but slower.",
+            "default": 3,
+            "minimum": 1,
+            "maximum": 10,
+            "editor": "number"
+        }
+    }
+}

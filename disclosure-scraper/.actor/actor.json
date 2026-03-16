@@ -1,0 +1,11 @@
+{
+    "actorSpecification": 1,
+    "name": "dealer-disclosure-scraper",
+    "title": "Dealer Disclosure Scraper",
+    "description": "Scrapes competitor dealer vehicle detail pages for hidden fees, doc fees, market adjustments, financing disclosures, and trade allowance fine print. Uses GPT to parse structured data from raw disclosure text.",
+    "version": "0.0",
+    "buildTag": "latest",
+    "environmentVariables": {},
+    "dockerfile": "../Dockerfile",
+    "input": "./INPUT_SCHEMA.json"
+}
