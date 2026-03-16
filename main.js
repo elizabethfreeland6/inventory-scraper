@@ -23,8 +23,12 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
 // ─────────────────────────────────────────────────────────────────────────────
 // DEALER INVENTORY SCRAPER
 // Supports:
-//   • Dealer.com platform  (Walker, Murfreesboro, Serra, Darrell Waltrip)
+//   • Dealer.com platform  (Freeland, Walker, Murfreesboro, Serra, Darrell Waltrip)
 //   • Dealer Inspire platform (Carl Black)
+//
+// DAYS IN STOCK TRACKING:
+//   Uses Apify Key-Value Store to persist VIN first-seen dates across runs.
+//   Each run calculates daysOnLot for every vehicle and records sold vehicles.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BASE = 'inventory-data-bus1/getInventory';
@@ -32,9 +36,19 @@ const DI_BASE = 'apis/widget/INVENTORY_LISTING_DEFAULT_AUTO';
 
 const DEALERS = [
     {
+        name: 'Freeland Chevrolet',
+        platform: 'dealer_com',
+        baseUrl: 'https://www.freelandchevrolet.com',
+        isOwnDealership: true,  // Flag to distinguish our inventory from competitors
+        apiUrlNew:  `https://www.freelandchevrolet.com/${DI_BASE}_NEW:${BASE}`,
+        apiUrlUsed: `https://www.freelandchevrolet.com/${DI_BASE}_USED:${BASE}`,
+        apiUrlAll:  `https://www.freelandchevrolet.com/${DI_BASE}_ALL:${BASE}`,
+    },
+    {
         name: 'Carl Black Chevrolet Nashville',
         platform: 'dealer_inspire',
         baseUrl: 'https://www.carlblackchevy.com',
+        isOwnDealership: false,
         // Dealer Inspire: condition handled via URL path
         apiUrlNew:  null, // uses HTML scrape at /new-vehicles/
         apiUrlUsed: null, // uses HTML scrape at /used-vehicles/
@@ -44,6 +58,7 @@ const DEALERS = [
         name: 'Walker Chevrolet',
         platform: 'dealer_com',
         baseUrl: 'https://www.walkerchevrolet.com',
+        isOwnDealership: false,
         apiUrlNew:  `https://www.walkerchevrolet.com/${DI_BASE}_NEW:${BASE}`,
         apiUrlUsed: `https://www.walkerchevrolet.com/${DI_BASE}_USED:${BASE}`,
         apiUrlAll:  `https://www.walkerchevrolet.com/${DI_BASE}_ALL:${BASE}`,
@@ -52,6 +67,7 @@ const DEALERS = [
         name: 'Chevrolet Buick GMC of Murfreesboro',
         platform: 'dealer_com',
         baseUrl: 'https://www.chevroletbuickgmcofmurfreesboro.com',
+        isOwnDealership: false,
         apiUrlNew:  `https://www.chevroletbuickgmcofmurfreesboro.com/${DI_BASE}_NEW:${BASE}`,
         apiUrlUsed: `https://www.chevroletbuickgmcofmurfreesboro.com/${DI_BASE}_USED:${BASE}`,
         apiUrlAll:  `https://www.chevroletbuickgmcofmurfreesboro.com/${DI_BASE}_ALL:${BASE}`,
@@ -60,6 +76,7 @@ const DEALERS = [
         name: 'Serra Chevrolet Buick GMC Nashville',
         platform: 'dealer_com',
         baseUrl: 'https://www.serranashville.com',
+        isOwnDealership: false,
         apiUrlNew:  `https://www.serranashville.com/${DI_BASE}_NEW:${BASE}`,
         apiUrlUsed: `https://www.serranashville.com/${DI_BASE}_USED:${BASE}`,
         apiUrlAll:  `https://www.serranashville.com/${DI_BASE}_ALL:${BASE}`,
@@ -68,6 +85,7 @@ const DEALERS = [
         name: 'Darrell Waltrip Buick GMC',
         platform: 'dealer_com',
         baseUrl: 'https://www.darrellwaltripbuickgmc.com',
+        isOwnDealership: false,
         // NOTE: The ALL endpoint aggregates the entire dealer group (~6,000 vehicles).
         // Always use NEW or USED endpoints; combine them when condition = 'all'.
         apiUrlNew:  `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_NEW:${BASE}`,
@@ -81,6 +99,104 @@ const HEADERS = {
     'Accept': 'application/json, text/html, */*',
     'Accept-Language': 'en-US,en;q=0.9',
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAYS IN STOCK TRACKING
+// Uses Apify Key-Value Store (persists between runs) to track:
+//   - firstSeenDate: when a VIN was first scraped
+//   - daysOnLot: calculated each run as (today - firstSeenDate)
+//   - soldVehicles: VINs that disappeared since last run
+//
+// KV Store key format: "vin_history" → { [vin]: { firstSeenDate, dealer, make, model, year, trim } }
+// ─────────────────────────────────────────────────────────────────────────────
+
+const KV_HISTORY_KEY = 'vin_history';
+
+async function loadVinHistory(kvStore) {
+    const history = await kvStore.getValue(KV_HISTORY_KEY);
+    return history || {};
+}
+
+async function saveVinHistory(kvStore, history) {
+    await kvStore.setValue(KV_HISTORY_KEY, history);
+}
+
+function applyDaysInStock(vehicles, vinHistory, today) {
+    const todayStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
+
+    for (const vehicle of vehicles) {
+        if (!vehicle.vin) continue;
+
+        if (vinHistory[vehicle.vin]) {
+            // VIN seen before — calculate days on lot
+            const firstSeen = new Date(vinHistory[vehicle.vin].firstSeenDate);
+            const msOnLot = today - firstSeen;
+            vehicle.firstSeenDate = vinHistory[vehicle.vin].firstSeenDate;
+            vehicle.daysOnLot = Math.floor(msOnLot / (1000 * 60 * 60 * 24));
+        } else {
+            // New VIN — record today as first seen
+            vehicle.firstSeenDate = todayStr;
+            vehicle.daysOnLot = 0;
+            vinHistory[vehicle.vin] = {
+                firstSeenDate: todayStr,
+                dealer: vehicle.dealer,
+                make: vehicle.make,
+                model: vehicle.model,
+                year: vehicle.year,
+                trim: vehicle.trim,
+                condition: vehicle.condition,
+            };
+        }
+
+        // Age bucket for easy filtering
+        vehicle.ageBucket = getAgeBucket(vehicle.daysOnLot);
+    }
+
+    return vehicles;
+}
+
+function getAgeBucket(days) {
+    if (days === null || days === undefined) return 'Unknown';
+    if (days <= 15)  return '0-15 days';
+    if (days <= 30)  return '16-30 days';
+    if (days <= 45)  return '31-45 days';
+    if (days <= 60)  return '46-60 days';
+    if (days <= 90)  return '61-90 days';
+    if (days <= 120) return '91-120 days';
+    return '120+ days';
+}
+
+function detectSoldVehicles(vinHistory, currentVins, today) {
+    const todayStr = today.toISOString().split('T')[0];
+    const soldVehicles = [];
+
+    for (const [vin, record] of Object.entries(vinHistory)) {
+        if (!currentVins.has(vin) && !record.soldDate) {
+            // VIN was in history but not in today's scrape — mark as sold
+            const firstSeen = new Date(record.firstSeenDate);
+            const daysOnLot = Math.floor((today - firstSeen) / (1000 * 60 * 60 * 24));
+            soldVehicles.push({
+                vin,
+                dealer: record.dealer,
+                make: record.make,
+                model: record.model,
+                year: record.year,
+                trim: record.trim,
+                condition: record.condition,
+                firstSeenDate: record.firstSeenDate,
+                soldDate: todayStr,
+                daysOnLot,
+                ageBucket: getAgeBucket(daysOnLot),
+                status: 'Sold/Removed',
+            });
+            // Mark as sold in history so we don't re-report it
+            vinHistory[vin].soldDate = todayStr;
+            vinHistory[vin].daysOnLot = daysOnLot;
+        }
+    }
+
+    return soldVehicles;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEALER.COM SCRAPER
@@ -187,6 +303,7 @@ function parseDealerComVehicle(v, dealer) {
 
     return {
         dealer: dealer.name,
+        isOwnDealership: dealer.isOwnDealership || false,
         platform: 'Dealer.com',
         condition: v.condition || null,
         year: v.year || null,
@@ -212,11 +329,15 @@ function parseDealerComVehicle(v, dealer) {
         photoCount: images.length,
         detailUrl: detailUrl,
         scrapedAt: new Date().toISOString(),
+        // Days in stock fields — populated later by applyDaysInStock()
+        firstSeenDate: null,
+        daysOnLot: null,
+        ageBucket: null,
     };
 }
 
 function parseStatus(statusCode) {
-    // Dealer.com status codes: 1 = On Lot, 7 = In Transit
+    // Dealer.com status codes: 1 = On Lot, 7 = In Transit, 2 = On Order
     const statusMap = { 1: 'On Lot', 7: 'In Transit', 2: 'On Order' };
     return statusMap[statusCode] || `Unknown (${statusCode})`;
 }
@@ -330,6 +451,7 @@ function parseDealerInspireCard($, el, dealer) {
 
     return {
         dealer: dealer.name,
+        isOwnDealership: dealer.isOwnDealership || false,
         platform: 'Dealer Inspire',
         condition: dataCondition || 'New',
         year: year ? parseInt(year) : null,
@@ -355,6 +477,10 @@ function parseDealerInspireCard($, el, dealer) {
         photoCount: null,
         detailUrl: detailUrl,
         scrapedAt: new Date().toISOString(),
+        // Days in stock fields — populated later by applyDaysInStock()
+        firstSeenDate: null,
+        daysOnLot: null,
+        ageBucket: null,
     };
 }
 
@@ -368,6 +494,7 @@ function extractJsonLdVehicles($, dealer) {
                 if (item['@type'] === 'Car' || item['@type'] === 'Vehicle') {
                     vehicles.push({
                         dealer: dealer.name,
+                        isOwnDealership: dealer.isOwnDealership || false,
                         platform: 'Dealer Inspire',
                         condition: item.itemCondition?.includes('New') ? 'New' : 'Used',
                         year: item.modelDate ? parseInt(item.modelDate) : null,
@@ -393,6 +520,9 @@ function extractJsonLdVehicles($, dealer) {
                         photoCount: null,
                         detailUrl: item.url || null,
                         scrapedAt: new Date().toISOString(),
+                        firstSeenDate: null,
+                        daysOnLot: null,
+                        ageBucket: null,
                     });
                 }
             }
@@ -450,9 +580,20 @@ const targetDealers = (input.dealers && input.dealers.length > 0)
 console.log(`Scraping ${targetDealers.length} dealer(s)...`);
 console.log(`Filters: condition=${input.condition || 'all'}, make=${input.make || 'any'}, model=${input.model || 'any'}`);
 
-const dataset = await Actor.openDataset();
-let totalSaved = 0;
+// Open persistent KV store for days-in-stock tracking
+const kvStore = await Actor.openKeyValueStore('vin-history');
+const vinHistory = await loadVinHistory(kvStore);
+const today = new Date();
+const todayStr = today.toISOString().split('T')[0];
+console.log(`Loaded VIN history: ${Object.keys(vinHistory).length} VINs tracked so far`);
 
+const inventoryDataset = await Actor.openDataset('inventory');
+const soldDataset = await Actor.openDataset('sold-vehicles');
+
+let totalSaved = 0;
+const allCurrentVins = new Set();
+
+// ── Scrape all dealers ──
 for (const dealer of targetDealers) {
     let vehicles = [];
 
@@ -466,13 +607,46 @@ for (const dealer of targetDealers) {
         console.error(`[${dealer.name}] Fatal error: ${err.message}`);
     }
 
+    // Track all VINs seen this run
+    for (const v of vehicles) {
+        if (v.vin) allCurrentVins.add(v.vin);
+    }
+
+    // Apply days-in-stock calculations
+    vehicles = applyDaysInStock(vehicles, vinHistory, today);
+
     if (vehicles.length > 0) {
-        await dataset.pushData(vehicles);
+        await inventoryDataset.pushData(vehicles);
         totalSaved += vehicles.length;
-        console.log(`[${dealer.name}] Saved ${vehicles.length} vehicles to dataset`);
+        const avgDays = vehicles
+            .filter(v => v.daysOnLot !== null)
+            .reduce((sum, v, _, arr) => sum + v.daysOnLot / arr.length, 0);
+        console.log(`[${dealer.name}] Saved ${vehicles.length} vehicles | Avg days on lot: ${Math.round(avgDays)}`);
     }
 }
 
-console.log(`\nDone! Total vehicles saved: ${totalSaved}`);
+// ── Detect sold/removed vehicles ──
+if (Object.keys(vinHistory).length > 0) {
+    const soldVehicles = detectSoldVehicles(vinHistory, allCurrentVins, today);
+    if (soldVehicles.length > 0) {
+        await soldDataset.pushData(soldVehicles);
+        console.log(`\nDetected ${soldVehicles.length} sold/removed vehicles since last run`);
+        for (const sv of soldVehicles.slice(0, 10)) {
+            console.log(`  SOLD: [${sv.dealer}] ${sv.year} ${sv.make} ${sv.model} ${sv.trim || ''} — ${sv.daysOnLot} days on lot`);
+        }
+    } else {
+        console.log('\nNo vehicles sold/removed since last run (or this is the first run)');
+    }
+}
+
+// ── Save updated VIN history ──
+await saveVinHistory(kvStore, vinHistory);
+console.log(`VIN history updated: ${Object.keys(vinHistory).length} total VINs tracked`);
+
+console.log(`\n═══════════════════════════════════════`);
+console.log(`Run complete: ${todayStr}`);
+console.log(`Total vehicles saved: ${totalSaved}`);
+console.log(`Total VINs in history: ${Object.keys(vinHistory).length}`);
+console.log(`═══════════════════════════════════════`);
 
 await Actor.exit();
