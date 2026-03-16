@@ -425,7 +425,7 @@ await Actor.init();
 const input = await Actor.getInput() || {};
 
 // Which dealers to scrape (default: all)
-const targetDealers = input.dealers
+const targetDealers = (input.dealers && input.dealers.length > 0)
     ? DEALERS.filter(d => input.dealers.some(name => d.name.toLowerCase().includes(name.toLowerCase())))
     : DEALERS;
 
