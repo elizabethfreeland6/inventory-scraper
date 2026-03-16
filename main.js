@@ -86,11 +86,16 @@ const DEALERS = [
         platform: 'dealer_com',
         baseUrl: 'https://www.darrellwaltripbuickgmc.com',
         isOwnDealership: false,
-        // NOTE: The ALL endpoint aggregates the entire dealer group (~6,000 vehicles).
-        // Always use NEW or USED endpoints; combine them when condition = 'all'.
+        // NOTE: Both the ALL and USED endpoints aggregate the entire dealer group
+        // (Waltrip Honda, Toyota, etc.) returning 4,000+ vehicles.
+        // Use only the NEW endpoint; for 'all' condition, also cap USED to Buick/GMC/Chevrolet makes.
         apiUrlNew:  `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_NEW:${BASE}`,
         apiUrlUsed: `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_USED:${BASE}`,
         apiUrlAll:  null, // intentionally disabled — would pull 6,000+ group-wide vehicles
+        // Filter used inventory to only Buick/GMC/Chevrolet to avoid cross-brand group data
+        usedMakeFilter: ['Buick', 'GMC', 'Chevrolet'],
+        // Cap used inventory at a reasonable number to detect runaway pagination
+        maxUsedVehicles: 300,
     },
 ];
 
@@ -251,7 +256,7 @@ function detectSoldVehicles(vinHistory, currentVins, today) {
 // Paginates through all results using pageStart parameter.
 // ─────────────────────────────────────────────────────────────────────────────
 async function scrapeDealerCom(dealer, input) {
-    const vehicles = [];
+    const rawVehicles = [];
     const condition = (input.condition || 'new').toLowerCase();
 
     // Select the correct endpoint(s) based on condition filter.
@@ -259,20 +264,41 @@ async function scrapeDealerCom(dealer, input) {
     // Darrell Waltrip has apiUrlAll = null (their ALL endpoint aggregates a dealer group).
     let endpoints = [];
     if (condition === 'new') {
-        endpoints = dealer.apiUrlNew ? [dealer.apiUrlNew] : [];
+        endpoints = dealer.apiUrlNew ? [{ url: dealer.apiUrlNew, endpointCondition: 'new' }] : [];
     } else if (condition === 'used') {
-        endpoints = dealer.apiUrlUsed ? [dealer.apiUrlUsed] : [];
+        endpoints = dealer.apiUrlUsed ? [{ url: dealer.apiUrlUsed, endpointCondition: 'used' }] : [];
     } else {
         // 'all' — prefer the combined endpoint; fall back to new+used if not available
         if (dealer.apiUrlAll) {
-            endpoints = [dealer.apiUrlAll];
+            endpoints = [{ url: dealer.apiUrlAll, endpointCondition: 'all' }];
         } else {
-            endpoints = [dealer.apiUrlNew, dealer.apiUrlUsed].filter(Boolean);
+            if (dealer.apiUrlNew) endpoints.push({ url: dealer.apiUrlNew, endpointCondition: 'new' });
+            if (dealer.apiUrlUsed) endpoints.push({ url: dealer.apiUrlUsed, endpointCondition: 'used' });
         }
     }
 
-    for (const apiUrl of endpoints) {
-        await scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles);
+    for (const ep of endpoints) {
+        const epInput = { ...input };
+        // Apply dealer-specific make filter for used inventory (e.g. Darrell Waltrip group)
+        if (ep.endpointCondition === 'used' && dealer.usedMakeFilter) {
+            epInput._usedMakeFilter = dealer.usedMakeFilter;
+            epInput._maxVehicles = dealer.maxUsedVehicles;
+        }
+        await scrapeDealerComEndpoint(dealer, ep.url, epInput, rawVehicles);
+    }
+
+    // Deduplicate by VIN within this dealer (guards against endpoint overlap)
+    const seen = new Set();
+    const vehicles = [];
+    for (const v of rawVehicles) {
+        const key = v.vin || `${v.stockNumber}_${v.year}_${v.model}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            vehicles.push(v);
+        }
+    }
+    if (rawVehicles.length !== vehicles.length) {
+        console.log(`[${dealer.name}] Deduplication removed ${rawVehicles.length - vehicles.length} duplicate records`);
     }
 
     console.log(`[${dealer.name}] Total after all endpoints: ${vehicles.length} vehicles`);
@@ -311,9 +337,20 @@ async function scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles) {
         const pageVehicles = data.inventory || [];
         for (const v of pageVehicles) {
             const vehicle = parseDealerComVehicle(v, dealer);
-            // Apply filters from input
+            // Apply dealer-specific make filter (e.g. Darrell Waltrip group used inventory)
+            if (input._usedMakeFilter) {
+                const make = (vehicle.make || '').toLowerCase();
+                const allowed = input._usedMakeFilter.map(m => m.toLowerCase());
+                if (!allowed.includes(make)) continue;
+            }
+            // Apply general filters from input
             if (shouldInclude(vehicle, input)) {
                 vehicles.push(vehicle);
+            }
+            // Hard cap to prevent runaway pagination on group-wide endpoints
+            if (input._maxVehicles && vehicles.length >= input._maxVehicles) {
+                console.warn(`[${dealer.name}] Hit maxVehicles cap (${input._maxVehicles}) — stopping pagination`);
+                return;
             }
         }
 
@@ -624,6 +661,8 @@ const targetDealers = (input.dealers && input.dealers.length > 0)
     ? DEALERS.filter(d => input.dealers.some(name => d.name.toLowerCase().includes(name.toLowerCase())))
     : DEALERS;
 
+console.log('Target dealers:', targetDealers.map(d => `${d.name} (isOwn=${d.isOwnDealership})`).join(', '));
+
 console.log(`Scraping ${targetDealers.length} dealer(s)...`);
 console.log(`Filters: condition=${input.condition || 'all'}, make=${input.make || 'any'}, model=${input.model || 'any'}`);
 
@@ -639,10 +678,12 @@ const soldDataset = await Actor.openDataset('sold-vehicles');
 
 let totalSaved = 0;
 const allCurrentVins = new Set();
+const dealerResults = {}; // Track per-dealer results for summary
 
 // ── Scrape all dealers ──
 for (const dealer of targetDealers) {
     let vehicles = [];
+    dealerResults[dealer.name] = { count: 0, error: null, isOwn: dealer.isOwnDealership };
 
     try {
         if (dealer.platform === 'dealer_com') {
@@ -652,6 +693,7 @@ for (const dealer of targetDealers) {
         }
     } catch (err) {
         console.error(`[${dealer.name}] Fatal error: ${err.message}`);
+        dealerResults[dealer.name].error = err.message;
     }
 
     // Track all VINs seen this run
@@ -665,10 +707,14 @@ for (const dealer of targetDealers) {
     if (vehicles.length > 0) {
         await inventoryDataset.pushData(vehicles);
         totalSaved += vehicles.length;
+        dealerResults[dealer.name].count = vehicles.length;
         const avgDays = vehicles
             .filter(v => v.daysOnLot !== null)
             .reduce((sum, v, _, arr) => sum + v.daysOnLot / arr.length, 0);
-        console.log(`[${dealer.name}] Saved ${vehicles.length} vehicles | Avg days on lot: ${Math.round(avgDays)}`);
+        const ownCount = vehicles.filter(v => v.isOwnDealership).length;
+        console.log(`[${dealer.name}] Saved ${vehicles.length} vehicles | isOwn=${dealer.isOwnDealership} | ownTagged=${ownCount} | Avg days on lot: ${Math.round(avgDays)}`);
+    } else {
+        console.warn(`[${dealer.name}] WARNING: 0 vehicles scraped! isOwn=${dealer.isOwnDealership}`);
     }
 }
 
@@ -694,6 +740,12 @@ console.log(`\n═════════════════════�
 console.log(`Run complete: ${todayStr}`);
 console.log(`Total vehicles saved: ${totalSaved}`);
 console.log(`Total VINs in history: ${Object.keys(vinHistory).length}`);
+console.log('\nPer-dealer summary:');
+for (const [name, result] of Object.entries(dealerResults)) {
+    const status = result.error ? `ERROR: ${result.error}` : `${result.count} vehicles`;
+    const ownFlag = result.isOwn ? ' [OWN DEALERSHIP]' : '';
+    console.log(`  ${name}${ownFlag}: ${status}`);
+}
 console.log(`═══════════════════════════════════════`);
 
 await Actor.exit();
