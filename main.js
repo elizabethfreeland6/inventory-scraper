@@ -86,16 +86,17 @@ const DEALERS = [
         platform: 'dealer_com',
         baseUrl: 'https://www.darrellwaltripbuickgmc.com',
         isOwnDealership: false,
-        // NOTE: Both the ALL and USED endpoints aggregate the entire dealer group
-        // (Waltrip Honda, Toyota, etc.) returning 4,000+ vehicles.
-        // Use only the NEW endpoint; for 'all' condition, also cap USED to Buick/GMC/Chevrolet makes.
+        // NOTE: Both the ALL and USED endpoints aggregate the entire Waltrip auto group
+        // (Honda, Toyota, Audi, etc.) returning 6,000+ vehicles. The Dealer.com API has no
+        // rooftop-level URL filter. We use the NEW endpoint directly and apply a post-fetch
+        // make filter on the USED endpoint to keep only Buick/GMC/Chevrolet.
         apiUrlNew:  `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_NEW:${BASE}`,
         apiUrlUsed: `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_USED:${BASE}`,
         apiUrlAll:  null, // intentionally disabled — would pull 6,000+ group-wide vehicles
-        // Filter used inventory to only Buick/GMC/Chevrolet to avoid cross-brand group data
+        // IMPORTANT: The _USED endpoint returns the entire Waltrip auto group (~6,000 vehicles
+        // including Honda, Toyota, Audi, etc.). The Dealer.com API has no rooftop-level filter.
+        // We apply a post-fetch make filter in the main loop to keep only Buick/GMC/Chevrolet.
         usedMakeFilter: ['Buick', 'GMC', 'Chevrolet'],
-        // Cap used inventory at a reasonable number to detect runaway pagination
-        maxUsedVehicles: 300,
     },
 ];
 
@@ -278,13 +279,7 @@ async function scrapeDealerCom(dealer, input) {
     }
 
     for (const ep of endpoints) {
-        const epInput = { ...input };
-        // Apply dealer-specific make filter for used inventory (e.g. Darrell Waltrip group)
-        if (ep.endpointCondition === 'used' && dealer.usedMakeFilter) {
-            epInput._usedMakeFilter = dealer.usedMakeFilter;
-            epInput._maxVehicles = dealer.maxUsedVehicles;
-        }
-        await scrapeDealerComEndpoint(dealer, ep.url, epInput, rawVehicles);
+        await scrapeDealerComEndpoint(dealer, ep.url, input, rawVehicles);
     }
 
     // Deduplicate by VIN within this dealer (guards against endpoint overlap)
@@ -337,20 +332,9 @@ async function scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles) {
         const pageVehicles = data.inventory || [];
         for (const v of pageVehicles) {
             const vehicle = parseDealerComVehicle(v, dealer);
-            // Apply dealer-specific make filter (e.g. Darrell Waltrip group used inventory)
-            if (input._usedMakeFilter) {
-                const make = (vehicle.make || '').toLowerCase();
-                const allowed = input._usedMakeFilter.map(m => m.toLowerCase());
-                if (!allowed.includes(make)) continue;
-            }
             // Apply general filters from input
             if (shouldInclude(vehicle, input)) {
                 vehicles.push(vehicle);
-            }
-            // Hard cap to prevent runaway pagination on group-wide endpoints
-            if (input._maxVehicles && vehicles.length >= input._maxVehicles) {
-                console.warn(`[${dealer.name}] Hit maxVehicles cap (${input._maxVehicles}) — stopping pagination`);
-                return;
             }
         }
 
@@ -389,6 +373,10 @@ function parseDealerComVehicle(v, dealer) {
         dealer: dealer.name,
         isOwnDealership: dealer.isOwnDealership || false,
         platform: 'Dealer.com',
+        // accountId identifies the specific rooftop within a dealer group.
+        // For group-wide endpoints (e.g. Darrell Waltrip), this is the same for all vehicles
+        // because the API does not expose per-rooftop identifiers — filtering must be done by make.
+        accountId: v.accountId || null,
         condition: v.condition || null,
         year: v.year || null,
         make: v.make || null,
@@ -694,6 +682,24 @@ for (const dealer of targetDealers) {
     } catch (err) {
         console.error(`[${dealer.name}] Fatal error: ${err.message}`);
         dealerResults[dealer.name].error = err.message;
+    }
+
+    // ── Post-fetch make filter (for dealer groups with shared used inventory endpoints) ──
+    // The Dealer.com API does not support rooftop-level filtering via URL parameters.
+    // For dealers like Darrell Waltrip whose _USED endpoint returns the entire auto group
+    // (Honda, Toyota, Audi, etc.), we filter to only the brands sold at this specific store.
+    if (dealer.usedMakeFilter && vehicles.length > 0) {
+        const before = vehicles.length;
+        const allowed = dealer.usedMakeFilter.map(m => m.toLowerCase());
+        vehicles = vehicles.filter(v => {
+            const cond = (v.condition || '').toLowerCase();
+            if (cond === 'new') return true; // Never filter new vehicles by make
+            return allowed.includes((v.make || '').toLowerCase());
+        });
+        const removed = before - vehicles.length;
+        if (removed > 0) {
+            console.log(`[${dealer.name}] Make filter: removed ${removed} non-${dealer.usedMakeFilter.join('/')} used vehicles (${before} → ${vehicles.length})`);
+        }
     }
 
     // Track all VINs seen this run
