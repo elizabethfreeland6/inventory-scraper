@@ -1,18 +1,68 @@
 {
-    "name": "dealer-inventory-scraper",
-    "version": "1.0.0",
-    "description": "Scrapes new and used vehicle inventory from competitor Chevrolet dealerships in the Nashville, TN area. Supports Dealer.com and Dealer Inspire platforms.",
-    "type": "module",
-    "main": "main.js",
-    "scripts": {
-        "start": "node main.js"
-    },
-    "dependencies": {
-        "apify": "^3.2.2",
-        "cheerio": "^1.0.0",
-        "got-scraping": "^4.0.4"
-    },
-    "engines": {
-        "node": ">=18.0.0"
+    "title": "Dealer Inventory Scraper Input",
+    "description": "Configure which dealers to scrape and optionally filter the results.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "dealers": {
+            "title": "Dealers to scrape",
+            "type": "array",
+            "description": "Leave empty to scrape ALL 5 dealers. Or enter one or more dealer name keywords (e.g. ['Walker', 'Serra']) to scrape only those.",
+            "editor": "stringList",
+            "default": []
+        },
+        "condition": {
+            "title": "Vehicle condition",
+            "type": "string",
+            "description": "Filter by new, used, or all vehicles.",
+            "editor": "select",
+            "enum": ["all", "new", "used"],
+            "enumTitles": ["All vehicles", "New only", "Used only"],
+            "default": "new"
+        },
+        "make": {
+            "title": "Make filter",
+            "type": "string",
+            "description": "Optional: filter by make (e.g. 'Chevrolet', 'GMC', 'Buick'). Leave blank for all makes.",
+            "editor": "textfield",
+            "default": ""
+        },
+        "model": {
+            "title": "Model filter",
+            "type": "string",
+            "description": "Optional: filter by model keyword (e.g. 'Silverado', 'Tahoe'). Leave blank for all models.",
+            "editor": "textfield",
+            "default": ""
+        },
+        "minYear": {
+            "title": "Minimum year",
+            "type": "integer",
+            "description": "Optional: only include vehicles from this year or newer.",
+            "editor": "number",
+            "minimum": 1990,
+            "maximum": 2030
+        },
+        "maxYear": {
+            "title": "Maximum year",
+            "type": "integer",
+            "description": "Optional: only include vehicles from this year or older.",
+            "editor": "number",
+            "minimum": 1990,
+            "maximum": 2030
+        },
+        "minPrice": {
+            "title": "Minimum price ($)",
+            "type": "integer",
+            "description": "Optional: only include vehicles at or above this price.",
+            "editor": "number",
+            "minimum": 0
+        },
+        "maxPrice": {
+            "title": "Maximum price ($)",
+            "type": "integer",
+            "description": "Optional: only include vehicles at or below this price.",
+            "editor": "number",
+            "minimum": 0
+        }
     }
 }

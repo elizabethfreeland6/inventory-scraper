@@ -1,86 +1,113 @@
-# Nashville Chevrolet Dealer Inventory Scraper
+// Standalone test — validates the core scraping logic against live dealer APIs
+// Run with: node test.js
 
-Scrapes vehicle inventory from **5 Nashville-area Chevrolet dealerships** and returns clean, structured data for each vehicle. Built to work with Claude via Apify's MCP connector.
+import { gotScraping } from 'got-scraping';
 
-## Dealers Covered
+const DEALERS_DEALERCOM = [
+    {
+        name: 'Walker Chevrolet',
+        apiUrl: 'https://www.walkerchevrolet.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_ALL:inventory-data-bus1/getInventory',
+        baseUrl: 'https://www.walkerchevrolet.com',
+    },
+    {
+        name: 'Serra Chevrolet Buick GMC Nashville',
+        apiUrl: 'https://www.serranashville.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_ALL:inventory-data-bus1/getInventory',
+        baseUrl: 'https://www.serranashville.com',
+    },
+    {
+        name: 'Chevrolet Buick GMC of Murfreesboro',
+        apiUrl: 'https://www.chevroletbuickgmcofmurfreesboro.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_ALL:inventory-data-bus1/getInventory',
+        baseUrl: 'https://www.chevroletbuickgmcofmurfreesboro.com',
+    },
+    {
+        name: 'Darrell Waltrip Buick GMC',
+        apiUrl: 'https://www.darrellwaltripbuickgmc.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_ALL:inventory-data-bus1/getInventory',
+        baseUrl: 'https://www.darrellwaltripbuickgmc.com',
+    },
+];
 
-| Dealer | Platform | Website |
-|---|---|---|
-| Carl Black Chevrolet Nashville | Dealer Inspire | carlblackchevy.com |
-| Walker Chevrolet | Dealer.com | walkerchevrolet.com |
-| Chevrolet Buick GMC of Murfreesboro | Dealer.com | chevroletbuickgmcofmurfreesboro.com |
-| Serra Chevrolet Buick GMC Nashville | Dealer.com | serranashville.com |
-| Darrell Waltrip Buick GMC | Dealer.com | darrellwaltripbuickgmc.com |
+const HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/html, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+};
 
-## Output Fields
+function parseDealerComVehicle(v, dealer) {
+    const attrs = {};
+    for (const attr of (v.attributes || [])) {
+        attrs[attr.name] = attr.value;
+    }
+    const pricing = v.pricing || {};
+    const msrp = pricing.retailPrice || null;
+    let dealerPrice = null;
+    for (const dp of (pricing.dprice || [])) {
+        if (dp.isFinalPrice || dp.typeClass === 'wholesalePrice') dealerPrice = dp.value;
+    }
+    const detailPath = v.link || '';
+    const detailUrl = detailPath.startsWith('http') ? detailPath : `${dealer.baseUrl}${detailPath}`;
+    const images = v.images || [];
+    const statusMap = { 1: 'On Lot', 7: 'In Transit', 2: 'On Order' };
 
-Each vehicle record contains:
-
-| Field | Description |
-|---|---|
-| `dealer` | Dealership name |
-| `platform` | Website platform (Dealer.com or Dealer Inspire) |
-| `condition` | New or Used |
-| `year` | Model year |
-| `make` | Make (Chevrolet, GMC, Buick, etc.) |
-| `model` | Model name |
-| `trim` | Trim level |
-| `bodyStyle` | SUV, Truck, Sedan, etc. |
-| `fuelType` | Gasoline, Electric, Hybrid |
-| `vin` | Vehicle Identification Number |
-| `stockNumber` | Dealer stock number |
-| `status` | On Lot / In Transit / On Order |
-| `exteriorColor` | Exterior color name |
-| `interiorColor` | Interior color name |
-| `engine` | Engine description |
-| `transmission` | Transmission type |
-| `drivetrain` | FWD / RWD / AWD / 4WD |
-| `mileage` | Odometer reading |
-| `mpgCity` | City fuel economy |
-| `mpgHighway` | Highway fuel economy |
-| `msrp` | MSRP price |
-| `dealerPrice` | Dealer's asking price (after discounts) |
-| `primaryPhotoUrl` | URL to the primary vehicle photo |
-| `photoCount` | Total number of photos |
-| `detailUrl` | Link to the vehicle detail page |
-| `scrapedAt` | Timestamp when the data was collected |
-
-## Input Options
-
-| Input | Type | Default | Description |
-|---|---|---|---|
-| `dealers` | string[] | all | Filter to specific dealers by name keyword |
-| `condition` | string | `new` | `new`, `used`, or `all` |
-| `make` | string | any | Filter by make (e.g. `Chevrolet`) |
-| `model` | string | any | Filter by model keyword (e.g. `Silverado`) |
-| `minYear` | integer | none | Minimum model year |
-| `maxYear` | integer | none | Maximum model year |
-| `minPrice` | integer | none | Minimum price in dollars |
-| `maxPrice` | integer | none | Maximum price in dollars |
-
-## Example Input (JSON)
-
-```json
-{
-    "condition": "new",
-    "make": "Chevrolet",
-    "model": "Silverado",
-    "minYear": 2025
+    return {
+        dealer: dealer.name,
+        condition: v.condition || null,
+        year: v.year || null,
+        make: v.make || null,
+        model: v.model || null,
+        trim: v.trim || null,
+        bodyStyle: v.bodyStyle || null,
+        fuelType: v.fuelType || null,
+        vin: v.vin || null,
+        stockNumber: v.stockNumber || null,
+        status: statusMap[v.status] || `Unknown(${v.status})`,
+        exteriorColor: attrs.exteriorColor || null,
+        interiorColor: attrs.interiorColor || null,
+        engine: attrs.engine || null,
+        transmission: attrs.transmission || null,
+        drivetrain: attrs.normalDriveLine || null,
+        mileage: attrs.odometer || null,
+        msrp: msrp,
+        dealerPrice: dealerPrice,
+        primaryPhotoUrl: images.length > 0 ? images[0].uri : null,
+        detailUrl: detailUrl,
+    };
 }
-```
 
-## Using with Claude via Apify MCP
+async function testDealer(dealer) {
+    const url = `${dealer.apiUrl}?pageSize=5&pageStart=0`;
+    try {
+        const response = await gotScraping({
+            url,
+            headers: HEADERS,
+            responseType: 'json',
+            timeout: { request: 15000 },
+        });
+        const data = response.body;
+        const total = data.pageInfo?.totalCount || 0;
+        const pageVehicles = (data.inventory || []).slice(0, 3);
+        const parsed = pageVehicles.map(v => parseDealerComVehicle(v, dealer));
 
-Once this Actor is published to your Apify account, you can connect it to Claude using the Apify MCP server URL: `https://mcp.apify.com`
+        console.log(`\n✅ ${dealer.name}`);
+        console.log(`   Total inventory: ${total}`);
+        console.log(`   Sample vehicles:`);
+        for (const v of parsed) {
+            console.log(`   - ${v.year} ${v.make} ${v.model} ${v.trim} | ${v.condition} | ${v.status} | MSRP: ${v.msrp} | Dealer: ${v.dealerPrice} | Color: ${v.exteriorColor} | VIN: ${v.vin}`);
+        }
+        return { dealer: dealer.name, total, sample: parsed };
+    } catch (err) {
+        console.log(`\n❌ ${dealer.name}: ${err.message}`);
+        return { dealer: dealer.name, error: err.message };
+    }
+}
 
-Then ask Claude things like:
-- *"Run my dealer inventory scraper and show me all new Silverado 1500s across all dealers"*
-- *"Compare Tahoe pricing across Walker and Serra"*
-- *"Which dealer has the most in-transit Silverado HDs?"*
+console.log('Testing Dealer.com API endpoints...\n');
+const results = await Promise.all(DEALERS_DEALERCOM.map(testDealer));
 
-## Notes
-
-- **Dealer.com** dealers are scraped via an internal JSON API — fast and reliable, returns all vehicles in paginated batches.
-- **Dealer Inspire** (Carl Black) is scraped via HTML parsing with JSON-LD structured data as a fallback.
-- Scraping is done respectfully with standard browser headers and no aggressive rate limiting.
-- Data is publicly available on each dealer's website and is intended for competitive market research.
+console.log('\n\n=== SUMMARY ===');
+for (const r of results) {
+    if (r.error) {
+        console.log(`❌ ${r.dealer}: FAILED - ${r.error}`);
+    } else {
+        console.log(`✅ ${r.dealer}: ${r.total} vehicles`);
+    }
+}

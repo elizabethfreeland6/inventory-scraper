@@ -1,0 +1,61 @@
+{
+    "actorSpecification": 1,
+    "name": "dealer-inventory-scraper",
+    "title": "Nashville Chevrolet Dealer Inventory Scraper",
+    "description": "Scrapes vehicle inventory (new & used) from 5 Nashville-area Chevrolet dealerships: Carl Black (Dealer Inspire), Walker Chevrolet, Chevy Buick GMC of Murfreesboro, Serra Chevrolet Nashville, and Darrell Waltrip Buick GMC (all Dealer.com). Returns structured data: VIN, year, make, model, trim, price, color, mileage, status, and photo URL.",
+    "version": "1.0",
+    "buildTag": "latest",
+    "environmentVariables": [],
+    "dockerfile": "./Dockerfile",
+    "readme": "./README.md",
+    "input": "../INPUT_SCHEMA.json",
+    "storages": {
+        "dataset": {
+            "actorSpecification": 1,
+            "views": {
+                "overview": {
+                    "title": "Vehicle Inventory",
+                    "transformation": {
+                        "fields": [
+                            "dealer",
+                            "condition",
+                            "year",
+                            "make",
+                            "model",
+                            "trim",
+                            "vin",
+                            "stockNumber",
+                            "status",
+                            "exteriorColor",
+                            "mileage",
+                            "msrp",
+                            "dealerPrice",
+                            "detailUrl",
+                            "scrapedAt"
+                        ]
+                    },
+                    "display": {
+                        "component": "table",
+                        "properties": {
+                            "dealer": { "label": "Dealer", "format": "text" },
+                            "condition": { "label": "Condition", "format": "text" },
+                            "year": { "label": "Year", "format": "number" },
+                            "make": { "label": "Make", "format": "text" },
+                            "model": { "label": "Model", "format": "text" },
+                            "trim": { "label": "Trim", "format": "text" },
+                            "vin": { "label": "VIN", "format": "text" },
+                            "stockNumber": { "label": "Stock #", "format": "text" },
+                            "status": { "label": "Status", "format": "text" },
+                            "exteriorColor": { "label": "Ext. Color", "format": "text" },
+                            "mileage": { "label": "Mileage", "format": "text" },
+                            "msrp": { "label": "MSRP", "format": "text" },
+                            "dealerPrice": { "label": "Dealer Price", "format": "text" },
+                            "detailUrl": { "label": "Detail Page", "format": "link" },
+                            "scrapedAt": { "label": "Scraped At", "format": "datetime" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
