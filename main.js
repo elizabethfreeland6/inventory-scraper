@@ -1,6 +1,24 @@
 import { Actor } from 'apify';
-import { gotScraping } from 'got-scraping';
 import * as cheerio from 'cheerio';
+
+// Native fetch wrapper with retry and timeout (no external HTTP library needed)
+async function fetchWithRetry(url, options = {}, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        try {
+            const response = await fetch(url, { signal: controller.signal, ...options });
+            clearTimeout(timeout);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response;
+        } catch (err) {
+            clearTimeout(timeout);
+            if (attempt === retries) throw err;
+            console.warn(`Attempt ${attempt} failed for ${url}: ${err.message}. Retrying...`);
+            await new Promise(r => setTimeout(r, 2000 * attempt));
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEALER INVENTORY SCRAPER
@@ -91,20 +109,14 @@ async function scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles) {
         const url = `${apiUrl}?pageSize=${pageSize}&pageStart=${pageStart}`;
         console.log(`[${dealer.name}] Fetching page starting at ${pageStart}...`);
 
-        let response;
+        let data;
         try {
-            response = await gotScraping({
-                url,
-                headers: HEADERS,
-                responseType: 'json',
-                timeout: { request: 30000 },
-            });
+            const response = await fetchWithRetry(url, { headers: HEADERS });
+            data = await response.json();
         } catch (err) {
             console.error(`[${dealer.name}] Request failed: ${err.message}`);
             break;
         }
-
-        const data = response.body;
         if (!data || !data.pageInfo) {
             console.error(`[${dealer.name}] Unexpected response structure`);
             break;
@@ -213,19 +225,18 @@ async function scrapeDealerInspire(dealer, input) {
         const url = `${dealer.baseUrl}${inventoryPath}?_p=${page}`;
         console.log(`[${dealer.name}] Fetching page ${page}...`);
 
-        let response;
+        let html;
         try {
-            response = await gotScraping({
-                url,
+            const response = await fetchWithRetry(url, {
                 headers: { ...HEADERS, 'Accept': 'text/html,application/xhtml+xml' },
-                timeout: { request: 30000 },
             });
+            html = await response.text();
         } catch (err) {
             console.error(`[${dealer.name}] Request failed: ${err.message}`);
             break;
         }
 
-        const $ = cheerio.load(response.body);
+        const $ = cheerio.load(html);
 
         // Dealer Inspire vehicle cards
         const cards = $('.di-vehicle-card, [class*="vehicle-card"], .inventory-listing-item, .vehicle');
