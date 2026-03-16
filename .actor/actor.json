@@ -5,7 +5,7 @@
     "description": "Scrapes vehicle inventory (new & used) from 5 Nashville-area Chevrolet dealerships: Carl Black (Dealer Inspire), Walker Chevrolet, Chevy Buick GMC of Murfreesboro, Serra Chevrolet Nashville, and Darrell Waltrip Buick GMC (all Dealer.com). Returns structured data: VIN, year, make, model, trim, price, color, mileage, status, and photo URL.",
     "version": "1.0",
     "buildTag": "latest",
-    "environmentVariables": [],
+    "environmentVariables": {},
     "dockerfile": "./Dockerfile",
     "readme": "./README.md",
     "input": "../INPUT_SCHEMA.json",
