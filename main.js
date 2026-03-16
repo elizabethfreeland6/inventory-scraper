@@ -304,6 +304,10 @@ async function scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles) {
     let pageStart = 0;
     let totalCount = null;
     const pageSize = 100; // Request max per page to minimize requests
+    // Track VINs seen so far in THIS endpoint call to detect looping pages.
+    // Some Dealer.com _ALL endpoints report a large totalCount but loop back to
+    // the same vehicles once pageStart exceeds the actual inventory size.
+    const seenVinsThisEndpoint = new Set();
 
     console.log(`[${dealer.name}] Starting Dealer.com scrape from ${apiUrl}...`);
 
@@ -326,10 +330,23 @@ async function scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles) {
 
         if (totalCount === null) {
             totalCount = data.pageInfo.totalCount;
-            console.log(`[${dealer.name}] Total vehicles: ${totalCount}`);
+            console.log(`[${dealer.name}] Total vehicles reported by API: ${totalCount}`);
         }
 
         const pageVehicles = data.inventory || [];
+        if (pageVehicles.length === 0) break;
+
+        // Check if this page is a repeat — Dealer.com loops back to page 0 once
+        // pageStart exceeds actual inventory size, causing duplicate records.
+        const pageVins = pageVehicles.map(v => v.vin).filter(Boolean);
+        const newVinsOnPage = pageVins.filter(vin => !seenVinsThisEndpoint.has(vin));
+        if (pageVins.length > 0 && newVinsOnPage.length === 0) {
+            console.log(`[${dealer.name}] Page at ${pageStart} is a repeat (all ${pageVins.length} VINs already seen) — stopping pagination early. API totalCount was ${totalCount} but actual inventory is ~${seenVinsThisEndpoint.size}.`);
+            break;
+        }
+
+        for (const vin of pageVins) seenVinsThisEndpoint.add(vin);
+
         for (const v of pageVehicles) {
             const vehicle = parseDealerComVehicle(v, dealer);
             // Apply general filters from input
