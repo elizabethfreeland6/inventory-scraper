@@ -27,40 +27,52 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
 //   • Dealer Inspire platform (Carl Black)
 // ─────────────────────────────────────────────────────────────────────────────
 
+const BASE = 'inventory-data-bus1/getInventory';
+const DI_BASE = 'apis/widget/INVENTORY_LISTING_DEFAULT_AUTO';
+
 const DEALERS = [
     {
         name: 'Carl Black Chevrolet Nashville',
         platform: 'dealer_inspire',
         baseUrl: 'https://www.carlblackchevy.com',
-        inventoryUrl: 'https://www.carlblackchevy.com/new-vehicles/',
+        // Dealer Inspire: condition handled via URL path
+        apiUrlNew:  null, // uses HTML scrape at /new-vehicles/
+        apiUrlUsed: null, // uses HTML scrape at /used-vehicles/
+        apiUrlAll:  null, // uses HTML scrape at /all-inventory/
     },
     {
         name: 'Walker Chevrolet',
         platform: 'dealer_com',
         baseUrl: 'https://www.walkerchevrolet.com',
-        apiUrl: 'https://www.walkerchevrolet.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_ALL:inventory-data-bus1/getInventory',
+        apiUrlNew:  `https://www.walkerchevrolet.com/${DI_BASE}_NEW:${BASE}`,
+        apiUrlUsed: `https://www.walkerchevrolet.com/${DI_BASE}_USED:${BASE}`,
+        apiUrlAll:  `https://www.walkerchevrolet.com/${DI_BASE}_ALL:${BASE}`,
     },
     {
         name: 'Chevrolet Buick GMC of Murfreesboro',
         platform: 'dealer_com',
         baseUrl: 'https://www.chevroletbuickgmcofmurfreesboro.com',
-        apiUrl: 'https://www.chevroletbuickgmcofmurfreesboro.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_ALL:inventory-data-bus1/getInventory',
+        apiUrlNew:  `https://www.chevroletbuickgmcofmurfreesboro.com/${DI_BASE}_NEW:${BASE}`,
+        apiUrlUsed: `https://www.chevroletbuickgmcofmurfreesboro.com/${DI_BASE}_USED:${BASE}`,
+        apiUrlAll:  `https://www.chevroletbuickgmcofmurfreesboro.com/${DI_BASE}_ALL:${BASE}`,
     },
     {
         name: 'Serra Chevrolet Buick GMC Nashville',
         platform: 'dealer_com',
         baseUrl: 'https://www.serranashville.com',
-        apiUrl: 'https://www.serranashville.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_ALL:inventory-data-bus1/getInventory',
+        apiUrlNew:  `https://www.serranashville.com/${DI_BASE}_NEW:${BASE}`,
+        apiUrlUsed: `https://www.serranashville.com/${DI_BASE}_USED:${BASE}`,
+        apiUrlAll:  `https://www.serranashville.com/${DI_BASE}_ALL:${BASE}`,
     },
     {
         name: 'Darrell Waltrip Buick GMC',
         platform: 'dealer_com',
         baseUrl: 'https://www.darrellwaltripbuickgmc.com',
-        // Note: This dealer has ~6,000 used vehicles in their ALL endpoint (likely a dealer group
-        // aggregator). Using separate NEW and USED endpoints to allow condition-based filtering.
-        apiUrlNew: 'https://www.darrellwaltripbuickgmc.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_NEW:inventory-data-bus1/getInventory',
-        apiUrlUsed: 'https://www.darrellwaltripbuickgmc.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_USED:inventory-data-bus1/getInventory',
-        apiUrl: 'https://www.darrellwaltripbuickgmc.com/apis/widget/INVENTORY_LISTING_DEFAULT_AUTO_NEW:inventory-data-bus1/getInventory',
+        // NOTE: The ALL endpoint aggregates the entire dealer group (~6,000 vehicles).
+        // Always use NEW or USED endpoints; combine them when condition = 'all'.
+        apiUrlNew:  `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_NEW:${BASE}`,
+        apiUrlUsed: `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_USED:${BASE}`,
+        apiUrlAll:  null, // intentionally disabled — would pull 6,000+ group-wide vehicles
     },
 ];
 
@@ -77,17 +89,23 @@ const HEADERS = {
 // ─────────────────────────────────────────────────────────────────────────────
 async function scrapeDealerCom(dealer, input) {
     const vehicles = [];
+    const condition = (input.condition || 'new').toLowerCase();
 
-    // Darrell Waltrip has separate new/used endpoints to avoid pulling 6,000+ aggregated used vehicles
-    // Determine which endpoint(s) to use based on the condition filter
+    // Select the correct endpoint(s) based on condition filter.
+    // Each dealer now has apiUrlNew, apiUrlUsed, and apiUrlAll.
+    // Darrell Waltrip has apiUrlAll = null (their ALL endpoint aggregates a dealer group).
     let endpoints = [];
-    if (dealer.apiUrlNew && dealer.apiUrlUsed) {
-        const condition = (input.condition || 'new').toLowerCase();
-        if (condition === 'new') endpoints = [dealer.apiUrlNew];
-        else if (condition === 'used') endpoints = [dealer.apiUrlUsed];
-        else endpoints = [dealer.apiUrlNew, dealer.apiUrlUsed]; // 'all'
+    if (condition === 'new') {
+        endpoints = dealer.apiUrlNew ? [dealer.apiUrlNew] : [];
+    } else if (condition === 'used') {
+        endpoints = dealer.apiUrlUsed ? [dealer.apiUrlUsed] : [];
     } else {
-        endpoints = [dealer.apiUrl];
+        // 'all' — prefer the combined endpoint; fall back to new+used if not available
+        if (dealer.apiUrlAll) {
+            endpoints = [dealer.apiUrlAll];
+        } else {
+            endpoints = [dealer.apiUrlNew, dealer.apiUrlUsed].filter(Boolean);
+        }
     }
 
     for (const apiUrl of endpoints) {
