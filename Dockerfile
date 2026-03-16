@@ -1,5 +1,5 @@
 # Use the official Apify Node.js base image
-FROM apify/actor-node:18
+FROM apify/actor-node:20
 
 # Copy package files and install dependencies
 COPY package*.json ./
