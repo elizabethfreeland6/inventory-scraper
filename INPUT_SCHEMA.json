@@ -7,7 +7,7 @@
         "dealers": {
             "title": "Dealers to scrape",
             "type": "array",
-            "description": "Leave empty to scrape ALL 5 dealers. Or enter one or more dealer name keywords (e.g. ['Walker', 'Serra']) to scrape only those.",
+            "description": "Leave empty to scrape ALL 6 dealers. Or enter one or more dealer name keywords (e.g. ['Walker', 'Serra']) to scrape only those.",
             "editor": "stringList",
             "default": []
         },
@@ -18,7 +18,7 @@
             "editor": "select",
             "enum": ["all", "new", "used"],
             "enumTitles": ["All vehicles", "New only", "Used only"],
-            "default": "new"
+            "default": "all"
         },
         "make": {
             "title": "Make filter",
