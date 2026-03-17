@@ -26,22 +26,49 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
 // gotScrapingFetch: uses got-scraping for Dealer.com API requests.
 // got-scraping mimics real browser TLS fingerprints (JA3/JA4 signatures), which is required
 // to bypass Akamai CDN caching that ignores pageStart for non-browser requests.
-async function gotScrapingFetch(url, headers, retries = 3) {
+async function gotScrapingFetch(url, headers, retries = 4) {
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
             const response = await gotScraping({
                 url,
                 headers,
-                responseType: 'json',
+                // Use 'text' responseType so we can inspect the raw body on errors
+                responseType: 'text',
                 timeout: { request: 30000 },
             });
-            return response.body;
+            const statusCode = response.statusCode;
+            if (statusCode === 429 || statusCode === 503) {
+                // Rate limited — wait longer and retry
+                const delay = 5000 * attempt;
+                console.warn(`[gotScraping] HTTP ${statusCode} at ${url}. Rate limited. Waiting ${delay}ms before retry ${attempt}/${retries}...`);
+                await new Promise(r => setTimeout(r, delay));
+                continue;
+            }
+            if (statusCode >= 400) {
+                console.warn(`[gotScraping] HTTP ${statusCode} at ${url}. Body: ${String(response.body).slice(0, 200)}`);
+                if (attempt === retries) return null;
+                await new Promise(r => setTimeout(r, 3000 * attempt));
+                continue;
+            }
+            // Parse JSON manually so we can see parse errors
+            try {
+                return JSON.parse(response.body);
+            } catch (parseErr) {
+                console.warn(`[gotScraping] JSON parse error at ${url}: ${parseErr.message}. Body: ${String(response.body).slice(0, 200)}`);
+                if (attempt === retries) return null;
+                await new Promise(r => setTimeout(r, 2000 * attempt));
+                continue;
+            }
         } catch (err) {
-            if (attempt === retries) throw err;
-            console.warn(`Attempt ${attempt} failed for ${url}: ${err.message}. Retrying in ${2 * attempt}s...`);
+            if (attempt === retries) {
+                console.error(`[gotScraping] All ${retries} attempts failed for ${url}: ${err.message}`);
+                return null;
+            }
+            console.warn(`[gotScraping] Attempt ${attempt} failed for ${url}: ${err.message}. Retrying in ${2 * attempt}s...`);
             await new Promise(r => setTimeout(r, 2000 * attempt));
         }
     }
+    return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -328,18 +355,21 @@ async function scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles) {
         console.log(`[${dealer.name}] Fetching page starting at ${pageStart}...`);
 
         let data;
-        try {
-            // Use gotScrapingFetch (browser TLS fingerprinting) to bypass Akamai CDN caching.
-            // Plain fetch() causes Akamai to return the same cached page 0 regardless of pageStart.
-            data = await gotScrapingFetch(url, HEADERS);
-        } catch (err) {
-            console.error(`[${dealer.name}] Request failed: ${err.message}`);
+        // Use gotScrapingFetch (browser TLS fingerprinting) to bypass Akamai CDN caching.
+        // Plain fetch() causes Akamai to return the same cached page 0 regardless of pageStart.
+        data = await gotScrapingFetch(url, HEADERS);
+
+        if (!data) {
+            console.error(`[${dealer.name}] No data returned (null response) — skipping remaining pages`);
             break;
         }
-        if (!data || !data.pageInfo) {
-            console.error(`[${dealer.name}] Unexpected response structure`);
+        if (!data.pageInfo) {
+            console.error(`[${dealer.name}] Unexpected response structure (no pageInfo). Keys: ${Object.keys(data).join(', ')}`);
             break;
         }
+
+        // Polite delay between pages to avoid triggering rate limits
+        if (pageStart > 0) await new Promise(r => setTimeout(r, 500));
 
         if (totalCount === null) {
             totalCount = data.pageInfo.totalCount;
@@ -787,6 +817,12 @@ const dealerResults = {}; // Track per-dealer results for summary
 for (const dealer of targetDealers) {
     let vehicles = [];
     dealerResults[dealer.name] = { count: 0, error: null, isOwn: dealer.isOwnDealership };
+
+    // Polite delay between dealers to avoid triggering Akamai rate limiting across domains
+    if (targetDealers.indexOf(dealer) > 0) {
+        console.log(`Waiting 3s before scraping next dealer...`);
+        await new Promise(r => setTimeout(r, 3000));
+    }
 
     try {
         if (dealer.platform === 'dealer_com') {
