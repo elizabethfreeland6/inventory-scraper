@@ -186,7 +186,7 @@ const DEALERS = [
         name: 'Walker Chevrolet',
         platform: 'dealer_com',
         baseUrl: 'https://www.walkerchevrolet.com',
-        siteId: 'walkerchevrolet',
+        siteId: 'walkerchevroletgm',
         isOwnDealership: false,
     },
     {
@@ -207,7 +207,7 @@ const DEALERS = [
         name: 'Wilson County Chevrolet Buick GMC',
         platform: 'dealer_com',
         baseUrl: 'https://www.wilsoncountymotors.com',
-        siteId: 'wilsoncountymotors',
+        siteId: 'wilsoncountychevroletbuickgmc',
         isOwnDealership: false,
     },
 ];
