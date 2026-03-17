@@ -23,8 +23,8 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
 // ─────────────────────────────────────────────────────────────────────────────
 // DEALER INVENTORY SCRAPER
 // Supports:
-//   • Dealer.com platform  (Freeland, Walker, Murfreesboro, Serra, Darrell Waltrip)
-//   • Dealer Inspire platform (Carl Black)
+//   • Dealer.com platform  (Freeland, Walker, Murfreesboro, Serra,
+//                           Carl Black, Wilson County)
 //
 // DAYS IN STOCK TRACKING:
 //   Uses Apify Key-Value Store to persist VIN first-seen dates across runs.
@@ -46,13 +46,12 @@ const DEALERS = [
     },
     {
         name: 'Carl Black Chevrolet Nashville',
-        platform: 'dealer_inspire',
+        platform: 'dealer_com',
         baseUrl: 'https://www.carlblackchevy.com',
         isOwnDealership: false,
-        // Dealer Inspire: condition handled via URL path
-        apiUrlNew:  null, // uses HTML scrape at /new-vehicles/
-        apiUrlUsed: null, // uses HTML scrape at /used-vehicles/
-        apiUrlAll:  null, // uses HTML scrape at /all-inventory/
+        apiUrlNew:  `https://www.carlblackchevy.com/${DI_BASE}_NEW:${BASE}`,
+        apiUrlUsed: `https://www.carlblackchevy.com/${DI_BASE}_USED:${BASE}`,
+        apiUrlAll:  `https://www.carlblackchevy.com/${DI_BASE}_ALL:${BASE}`,
     },
     {
         name: 'Walker Chevrolet',
@@ -82,21 +81,13 @@ const DEALERS = [
         apiUrlAll:  `https://www.serranashville.com/${DI_BASE}_ALL:${BASE}`,
     },
     {
-        name: 'Darrell Waltrip Buick GMC',
+        name: 'Wilson County Chevrolet Buick GMC',
         platform: 'dealer_com',
-        baseUrl: 'https://www.darrellwaltripbuickgmc.com',
+        baseUrl: 'https://www.wilsoncountymotors.com',
         isOwnDealership: false,
-        // NOTE: Both the ALL and USED endpoints aggregate the entire Waltrip auto group
-        // (Honda, Toyota, Audi, etc.) returning 6,000+ vehicles. The Dealer.com API has no
-        // rooftop-level URL filter. We use the NEW endpoint directly and apply a post-fetch
-        // make filter on the USED endpoint to keep only Buick/GMC/Chevrolet.
-        apiUrlNew:  `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_NEW:${BASE}`,
-        apiUrlUsed: `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_USED:${BASE}`,
-        apiUrlAll:  null, // intentionally disabled — would pull 6,000+ group-wide vehicles
-        // IMPORTANT: The _USED endpoint returns the entire Waltrip auto group (~6,000 vehicles
-        // including Honda, Toyota, Audi, etc.). The Dealer.com API has no rooftop-level filter.
-        // We apply a post-fetch make filter in the main loop to keep only Buick/GMC/Chevrolet.
-        usedMakeFilter: ['Buick', 'GMC', 'Chevrolet'],
+        apiUrlNew:  `https://www.wilsoncountymotors.com/${DI_BASE}_NEW:${BASE}`,
+        apiUrlUsed: `https://www.wilsoncountymotors.com/${DI_BASE}_USED:${BASE}`,
+        apiUrlAll:  `https://www.wilsoncountymotors.com/${DI_BASE}_ALL:${BASE}`,
     },
 ];
 
