@@ -1,7 +1,10 @@
 import { Actor } from 'apify';
+import { gotScraping } from 'got-scraping';
 import * as cheerio from 'cheerio';
 
-// Native fetch wrapper with retry and timeout (no external HTTP library needed)
+// got-scraping wrapper: mimics real browser TLS fingerprints to bypass CDN bot detection.
+// Used for Dealer.com endpoints which are cached by Akamai and require browser-like requests
+// to paginate correctly past page 0. Falls back gracefully on error.
 async function fetchWithRetry(url, options = {}, retries = 3) {
     for (let attempt = 1; attempt <= retries; attempt++) {
         const controller = new AbortController();
@@ -15,6 +18,27 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
             clearTimeout(timeout);
             if (attempt === retries) throw err;
             console.warn(`Attempt ${attempt} failed for ${url}: ${err.message}. Retrying...`);
+            await new Promise(r => setTimeout(r, 2000 * attempt));
+        }
+    }
+}
+
+// gotScrapingFetch: uses got-scraping for Dealer.com API requests.
+// got-scraping mimics real browser TLS fingerprints (JA3/JA4 signatures), which is required
+// to bypass Akamai CDN caching that ignores pageStart for non-browser requests.
+async function gotScrapingFetch(url, headers, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const response = await gotScraping({
+                url,
+                headers,
+                responseType: 'json',
+                timeout: { request: 30000 },
+            });
+            return response.body;
+        } catch (err) {
+            if (attempt === retries) throw err;
+            console.warn(`Attempt ${attempt} failed for ${url}: ${err.message}. Retrying in ${2 * attempt}s...`);
             await new Promise(r => setTimeout(r, 2000 * attempt));
         }
     }
@@ -305,8 +329,9 @@ async function scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles) {
 
         let data;
         try {
-            const response = await fetchWithRetry(url, { headers: HEADERS });
-            data = await response.json();
+            // Use gotScrapingFetch (browser TLS fingerprinting) to bypass Akamai CDN caching.
+            // Plain fetch() causes Akamai to return the same cached page 0 regardless of pageStart.
+            data = await gotScrapingFetch(url, HEADERS);
         } catch (err) {
             console.error(`[${dealer.name}] Request failed: ${err.message}`);
             break;
