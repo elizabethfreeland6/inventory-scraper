@@ -46,12 +46,13 @@ const DEALERS = [
     },
     {
         name: 'Carl Black Chevrolet Nashville',
-        platform: 'dealer_com',
+        platform: 'algolia',
         baseUrl: 'https://www.carlblackchevy.com',
         isOwnDealership: false,
-        apiUrlNew:  `https://www.carlblackchevy.com/${DI_BASE}_NEW:${BASE}`,
-        apiUrlUsed: `https://www.carlblackchevy.com/${DI_BASE}_USED:${BASE}`,
-        apiUrlAll:  `https://www.carlblackchevy.com/${DI_BASE}_ALL:${BASE}`,
+        // Carl Black uses Dealer Inspire + Algolia search (not Dealer.com)
+        algoliaAppId:    '1WNYBZLEEN',
+        algoliaApiKey:   'e2acb682178e9dcc22d18ecb2ff7d9e4',
+        algoliaIndex:    'carlblackchevynashville_production_inventory',
     },
     {
         name: 'Walker Chevrolet',
@@ -631,6 +632,93 @@ function shouldInclude(vehicle, input) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ALGOLIA SCRAPER (Dealer Inspire + Algolia platform)
+// Used by: Carl Black Chevrolet Nashville
+// ─────────────────────────────────────────────────────────────────────────────
+async function scrapeAlgolia(dealer, input) {
+    const { algoliaAppId, algoliaApiKey, algoliaIndex } = dealer;
+    const url = `https://${algoliaAppId}-dsn.algolia.net/1/indexes/${algoliaIndex}/query`;
+    const headers = {
+        'X-Algolia-Application-Id': algoliaAppId,
+        'X-Algolia-API-Key': algoliaApiKey,
+        'Content-Type': 'application/json',
+    };
+
+    const vehicles = [];
+    const seenVins = new Set();
+
+    // Fetch new and used separately for clean condition tagging
+    for (const condition of ['New', 'Used']) {
+        let page = 0;
+        let totalPages = 1;
+        console.log(`[${dealer.name}] Fetching ${condition} vehicles from Algolia...`);
+
+        do {
+            const body = JSON.stringify({
+                query: '',
+                hitsPerPage: 100,
+                page,
+                filters: `type:${condition}`,
+            });
+            const r = await fetchWithRetry(url, { method: 'POST', headers, body });
+            const data = await r.json();
+
+            if (page === 0) {
+                totalPages = data.nbPages || 1;
+                console.log(`[${dealer.name}] ${condition}: ${data.nbHits} total vehicles, ${totalPages} pages`);
+            }
+
+            for (const hit of (data.hits || [])) {
+                const vin = hit.vin || hit.VIN || '';
+                if (vin && seenVins.has(vin)) continue;
+                if (vin) seenVins.add(vin);
+
+                const msrp = hit.msrp ? `$${Number(hit.msrp).toLocaleString()}` : null;
+                const price = hit.our_price ? `$${Number(hit.our_price).toLocaleString()}` : msrp;
+
+                const vehicle = {
+                    dealer: dealer.name,
+                    isOwnDealership: dealer.isOwnDealership || false,
+                    platform: 'Dealer Inspire (Algolia)',
+                    accountId: algoliaIndex,
+                    condition,
+                    year: hit.year ? parseInt(hit.year) : null,
+                    make: hit.make || '',
+                    model: hit.model || '',
+                    trim: hit.trim || '',
+                    bodyStyle: hit.body || '',
+                    fuelType: hit.fuel_type || '',
+                    vin,
+                    stockNumber: hit.stock || '',
+                    status: hit.intransit_filter || 'On Lot',
+                    exteriorColor: hit.ext_color || '',
+                    interiorColor: hit.int_color || '',
+                    engine: hit.engine || null,
+                    transmission: hit.transmission || null,
+                    drivetrain: hit.drivetrain || null,
+                    mileage: hit.mileage ? parseInt(hit.mileage) : null,
+                    mpgCity: null,
+                    mpgHighway: null,
+                    msrp,
+                    dealerPrice: price,
+                    primaryPhotoUrl: hit.image || null,
+                    photoCount: null,
+                    detailUrl: hit.link ? `${dealer.baseUrl}${hit.link}` : null,
+                    scrapedAt: new Date().toISOString(),
+                };
+
+                if (shouldInclude(vehicle, input)) vehicles.push(vehicle);
+            }
+
+            page++;
+        } while (page < totalPages);
+    }
+
+    console.log(`[${dealer.name}] Algolia scrape complete: ${vehicles.length} unique vehicles`);
+    return vehicles;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN ENTRY POINT
 // ─────────────────────────────────────────────────────────────────────────────
 await Actor.init();
@@ -680,6 +768,8 @@ for (const dealer of targetDealers) {
             vehicles = await scrapeDealerCom(dealer, input);
         } else if (dealer.platform === 'dealer_inspire') {
             vehicles = await scrapeDealerInspire(dealer, input);
+        } else if (dealer.platform === 'algolia') {
+            vehicles = await scrapeAlgolia(dealer, input);
         }
     } catch (err) {
         console.error(`[${dealer.name}] Fatal error: ${err.message}`);
