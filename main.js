@@ -338,14 +338,18 @@ async function scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles) {
 
         // Check if this page is a repeat — Dealer.com loops back to page 0 once
         // pageStart exceeds actual inventory size, causing duplicate records.
+        // We stop ONLY when ALL VINs on the page have been seen before (full repeat).
+        // A partial overlap is normal when inventory changes between pages.
         const pageVins = pageVehicles.map(v => v.vin).filter(Boolean);
         const newVinsOnPage = pageVins.filter(vin => !seenVinsThisEndpoint.has(vin));
         if (pageVins.length > 0 && newVinsOnPage.length === 0) {
-            console.log(`[${dealer.name}] Page at ${pageStart} is a repeat (all ${pageVins.length} VINs already seen) — stopping pagination early. API totalCount was ${totalCount} but actual inventory is ~${seenVinsThisEndpoint.size}.`);
+            // Every VIN on this page was already collected — we've looped back to the start.
+            console.log(`[${dealer.name}] Page at ${pageStart} is a full repeat (all ${pageVins.length} VINs already seen) — stopping. API totalCount=${totalCount}, actual inventory ~${seenVinsThisEndpoint.size}.`);
             break;
         }
 
-        for (const vin of pageVins) seenVinsThisEndpoint.add(vin);
+        // Add only the new VINs to our seen set
+        for (const vin of newVinsOnPage) seenVinsThisEndpoint.add(vin);
 
         for (const v of pageVehicles) {
             const vehicle = parseDealerComVehicle(v, dealer);
