@@ -1,6 +1,10 @@
-import { Actor } from 'apify';
+import { Actor, ProxyConfiguration } from 'apify';
 import { gotScraping } from 'got-scraping';
 import * as cheerio from 'cheerio';
+
+// Global proxy configuration - initialized after Actor.init()
+// Uses Apify residential proxies to rotate IPs per request, bypassing Akamai rate limits
+let proxyConfig = null;
 
 // got-scraping wrapper: mimics real browser TLS fingerprints to bypass CDN bot detection.
 // Used for Dealer.com endpoints which are cached by Akamai and require browser-like requests
@@ -29,12 +33,15 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
 async function gotScrapingFetch(url, headers, retries = 4) {
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
+            // Get a fresh proxy URL for each attempt to rotate IPs and bypass rate limits
+            const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
             const response = await gotScraping({
                 url,
                 headers,
                 // Use 'text' responseType so we can inspect the raw body on errors
                 responseType: 'text',
                 timeout: { request: 30000 },
+                ...(proxyUrl ? { proxyUrl } : {}),
             });
             const statusCode = response.statusCode;
             if (statusCode === 429 || statusCode === 503) {
@@ -777,6 +784,21 @@ async function scrapeAlgolia(dealer, input) {
 // MAIN ENTRY POINT
 // ─────────────────────────────────────────────────────────────────────────────
 await Actor.init();
+
+// Initialize proxy configuration for IP rotation
+// Uses Apify residential proxies to rotate IPs per Dealer.com page request,
+// preventing Akamai from rate-limiting sequential pages from the same IP.
+try {
+    proxyConfig = await Actor.createProxyConfiguration({
+        groups: ['RESIDENTIAL'],
+        countryCode: 'US',
+    });
+    console.log('Proxy configuration initialized: RESIDENTIAL US proxies enabled');
+} catch (err) {
+    console.warn(`Proxy configuration failed (may not be available on this plan): ${err.message}`);
+    console.warn('Continuing without proxy rotation — pagination may be limited by rate limiting');
+    proxyConfig = null;
+}
 
 const input = await Actor.getInput() || {};
 
