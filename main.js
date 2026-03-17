@@ -685,6 +685,15 @@ console.log(`Loaded VIN history: ${Object.keys(vinHistory).length} VINs tracked 
 const inventoryDataset = await Actor.openDataset('inventory');
 const soldDataset = await Actor.openDataset('sold-vehicles');
 
+// Clear the inventory dataset at the start of each run so we always have a
+// clean snapshot. Without this, every run appends to the previous run's data,
+// causing records to accumulate and vehicle counts to grow unboundedly.
+// The sold-vehicles dataset is intentionally NOT cleared — it is a running log.
+console.log('Clearing inventory dataset for fresh run...');
+await inventoryDataset.drop();
+const freshInventoryDataset = await Actor.openDataset('inventory');
+console.log('Inventory dataset cleared.');
+
 let totalSaved = 0;
 const allCurrentVins = new Set();
 const dealerResults = {}; // Track per-dealer results for summary
@@ -732,7 +741,7 @@ for (const dealer of targetDealers) {
     vehicles = applyDaysInStock(vehicles, vinHistory, today);
 
     if (vehicles.length > 0) {
-        await inventoryDataset.pushData(vehicles);
+        await freshInventoryDataset.pushData(vehicles);
         totalSaved += vehicles.length;
         dealerResults[dealer.name].count = vehicles.length;
         const avgDays = vehicles
