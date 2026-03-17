@@ -1,14 +1,15 @@
-import { Actor, ProxyConfiguration } from 'apify';
+import { Actor } from 'apify';
 import { gotScraping } from 'got-scraping';
 import * as cheerio from 'cheerio';
 
 // Global proxy configuration - initialized after Actor.init()
-// Uses Apify residential proxies to rotate IPs per request, bypassing Akamai rate limits
 let proxyConfig = null;
 
-// got-scraping wrapper: mimics real browser TLS fingerprints to bypass CDN bot detection.
-// Used for Dealer.com endpoints which are cached by Akamai and require browser-like requests
-// to paginate correctly past page 0. Falls back gracefully on error.
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Plain fetch with retry - used for non-Dealer.com endpoints (Algolia, etc.)
 async function fetchWithRetry(url, options = {}, retries = 3) {
     for (let attempt = 1; attempt <= retries; attempt++) {
         const controller = new AbortController();
@@ -27,27 +28,23 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
     }
 }
 
-// gotScrapingFetch: uses got-scraping for Dealer.com API requests.
-// got-scraping mimics real browser TLS fingerprints (JA3/JA4 signatures), which is required
-// to bypass Akamai CDN caching that ignores pageStart for non-browser requests.
+// gotScrapingFetch: uses got-scraping for browser TLS fingerprinting.
+// Used for Dealer.com requests to bypass Akamai CDN bot detection.
 async function gotScrapingFetch(url, headers, retries = 4) {
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
-            // Get a fresh proxy URL for each attempt to rotate IPs and bypass rate limits
             const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
             const response = await gotScraping({
                 url,
                 headers,
-                // Use 'text' responseType so we can inspect the raw body on errors
                 responseType: 'text',
                 timeout: { request: 30000 },
                 ...(proxyUrl ? { proxyUrl } : {}),
             });
             const statusCode = response.statusCode;
             if (statusCode === 429 || statusCode === 503) {
-                // Rate limited — wait longer and retry
                 const delay = 5000 * attempt;
-                console.warn(`[gotScraping] HTTP ${statusCode} at ${url}. Rate limited. Waiting ${delay}ms before retry ${attempt}/${retries}...`);
+                console.warn(`[gotScraping] HTTP ${statusCode} at ${url}. Rate limited. Waiting ${delay}ms...`);
                 await new Promise(r => setTimeout(r, delay));
                 continue;
             }
@@ -57,7 +54,6 @@ async function gotScrapingFetch(url, headers, retries = 4) {
                 await new Promise(r => setTimeout(r, 3000 * attempt));
                 continue;
             }
-            // Parse JSON manually so we can see parse errors
             try {
                 return JSON.parse(response.body);
             } catch (parseErr) {
@@ -78,36 +74,110 @@ async function gotScrapingFetch(url, headers, retries = 4) {
     return null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DEALER INVENTORY SCRAPER
-// Supports:
-//   • Dealer.com platform  (Freeland, Walker, Murfreesboro, Serra,
-//                           Carl Black, Wilson County)
-//
-// DAYS IN STOCK TRACKING:
-//   Uses Apify Key-Value Store to persist VIN first-seen dates across runs.
-//   Each run calculates daysOnLot for every vehicle and records sold vehicles.
-// ─────────────────────────────────────────────────────────────────────────────
+// WIS POST fetch: uses the Dealer.com Web Inventory Service (WIS) POST endpoint.
+// This is the actual API the website uses internally for pagination.
+// Uses "start" parameter (not "pageStart") as an array of strings.
+async function wisPostFetch(baseUrl, siteId, condition, startOffset, pageSize, retries = 4) {
+    const url = `${baseUrl}/api/widget/ws-inv-data/getInventory`;
+    const listingConfigId = condition === 'used' ? 'auto-used' : 'auto-new';
+    const pageAlias = condition === 'used'
+        ? 'INVENTORY_LISTING_DEFAULT_AUTO_USED'
+        : 'INVENTORY_LISTING_DEFAULT_AUTO_NEW';
 
-const BASE = 'inventory-data-bus1/getInventory';
-const DI_BASE = 'apis/widget/INVENTORY_LISTING_DEFAULT_AUTO';
+    const body = {
+        siteId,
+        locale: 'en_US',
+        device: 'DESKTOP',
+        pageAlias,
+        pageId: `${siteId}_SITEBUILDER_INVENTORY_SEARCH_RESULTS_AUTO_${condition === 'used' ? 'USED' : 'NEW'}_V1_1`,
+        windowId: 'inventory-data-bus2',
+        widgetName: 'ws-inv-data',
+        inventoryParameters: {
+            sortBy: ['internetPrice asc'],
+            ...(startOffset > 0 ? { start: [String(startOffset)] } : {}),
+        },
+        preferences: {
+            pageSize: String(pageSize),
+            'listing.config.id': listingConfigId,
+            'showFranchiseVehiclesOnly': 'true',
+            'suppressAllConditions': 'compliant',
+            'removeEmptyFacets': 'true',
+            'removeEmptyConstraints': 'true',
+            'required.display.attributes': 'accountId,accountName,askingPrice,bed,bodyStyle,cab,categoryName,certified,cityMpg,classification,classificationName,comments,daysOnLot,doors,driveLine,engine,engineSize,equipment,extColor,exteriorColor,fuelType,highwayMpg,id,incentives,intColor,interiorColor,internetComments,internetPrice,inventoryDate,invoicePrice,key,location,make,mileage,model,modelCode,msrp,normalExteriorColor,normalFuelType,normalInteriorColor,numSaves,odometer,optionCodes,options,packageCode,paymentMonthly,payments,primary_image,saleLease,salePrice,status,stockNumber,transmission,trim,trimLevel,type,uuid,vin,year',
+        },
+        includePricing: true,
+    };
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
+            const response = await gotScraping({
+                url,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Origin': baseUrl,
+                    'Referer': `${baseUrl}/new-inventory/`,
+                },
+                body: JSON.stringify(body),
+                responseType: 'text',
+                timeout: { request: 30000 },
+                ...(proxyUrl ? { proxyUrl } : {}),
+            });
+
+            const statusCode = response.statusCode;
+            if (statusCode === 429 || statusCode === 503) {
+                const delay = 5000 * attempt;
+                console.warn(`[WIS] HTTP ${statusCode} at ${url} (start=${startOffset}). Waiting ${delay}ms...`);
+                await new Promise(r => setTimeout(r, delay));
+                continue;
+            }
+            if (statusCode >= 400) {
+                console.warn(`[WIS] HTTP ${statusCode} at ${url} (start=${startOffset}). Body: ${String(response.body).slice(0, 300)}`);
+                if (attempt === retries) return null;
+                await new Promise(r => setTimeout(r, 3000 * attempt));
+                continue;
+            }
+            try {
+                return JSON.parse(response.body);
+            } catch (parseErr) {
+                console.warn(`[WIS] JSON parse error (start=${startOffset}): ${parseErr.message}. Body: ${String(response.body).slice(0, 200)}`);
+                if (attempt === retries) return null;
+                await new Promise(r => setTimeout(r, 2000 * attempt));
+                continue;
+            }
+        } catch (err) {
+            if (attempt === retries) {
+                console.error(`[WIS] All ${retries} attempts failed (start=${startOffset}): ${err.message}`);
+                return null;
+            }
+            console.warn(`[WIS] Attempt ${attempt} failed (start=${startOffset}): ${err.message}. Retrying in ${2 * attempt}s...`);
+            await new Promise(r => setTimeout(r, 2000 * attempt));
+        }
+    }
+    return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEALER CONFIGURATION
+// ─────────────────────────────────────────────────────────────────────────────
 
 const DEALERS = [
     {
         name: 'Freeland Chevrolet',
         platform: 'dealer_com',
         baseUrl: 'https://www.freelandchevrolet.com',
-        isOwnDealership: true,  // Flag to distinguish our inventory from competitors
-        apiUrlNew:  `https://www.freelandchevrolet.com/${DI_BASE}_NEW:${BASE}`,
-        apiUrlUsed: `https://www.freelandchevrolet.com/${DI_BASE}_USED:${BASE}`,
-        apiUrlAll:  `https://www.freelandchevrolet.com/${DI_BASE}_ALL:${BASE}`,
+        siteId: 'freelandchevrolet',
+        isOwnDealership: true,
     },
     {
         name: 'Carl Black Chevrolet Nashville',
         platform: 'algolia',
         baseUrl: 'https://www.carlblackchevy.com',
         isOwnDealership: false,
-        // Carl Black uses Dealer Inspire + Algolia search (not Dealer.com)
         algoliaAppId:    '1WNYBZLEEN',
         algoliaApiKey:   'e2acb682178e9dcc22d18ecb2ff7d9e4',
         algoliaIndex:    'carlblackchevynashville_production_inventory',
@@ -116,37 +186,29 @@ const DEALERS = [
         name: 'Walker Chevrolet',
         platform: 'dealer_com',
         baseUrl: 'https://www.walkerchevrolet.com',
+        siteId: 'walkerchevrolet',
         isOwnDealership: false,
-        apiUrlNew:  `https://www.walkerchevrolet.com/${DI_BASE}_NEW:${BASE}`,
-        apiUrlUsed: `https://www.walkerchevrolet.com/${DI_BASE}_USED:${BASE}`,
-        apiUrlAll:  `https://www.walkerchevrolet.com/${DI_BASE}_ALL:${BASE}`,
     },
     {
         name: 'Chevrolet Buick GMC of Murfreesboro',
         platform: 'dealer_com',
         baseUrl: 'https://www.chevroletbuickgmcofmurfreesboro.com',
+        siteId: 'chevroletbuickgmcofmurfreesboro',
         isOwnDealership: false,
-        apiUrlNew:  `https://www.chevroletbuickgmcofmurfreesboro.com/${DI_BASE}_NEW:${BASE}`,
-        apiUrlUsed: `https://www.chevroletbuickgmcofmurfreesboro.com/${DI_BASE}_USED:${BASE}`,
-        apiUrlAll:  `https://www.chevroletbuickgmcofmurfreesboro.com/${DI_BASE}_ALL:${BASE}`,
     },
     {
         name: 'Serra Chevrolet Buick GMC Nashville',
         platform: 'dealer_com',
         baseUrl: 'https://www.serranashville.com',
+        siteId: 'serrachevroletbuickgmcnashville',
         isOwnDealership: false,
-        apiUrlNew:  `https://www.serranashville.com/${DI_BASE}_NEW:${BASE}`,
-        apiUrlUsed: `https://www.serranashville.com/${DI_BASE}_USED:${BASE}`,
-        apiUrlAll:  `https://www.serranashville.com/${DI_BASE}_ALL:${BASE}`,
     },
     {
         name: 'Wilson County Chevrolet Buick GMC',
         platform: 'dealer_com',
         baseUrl: 'https://www.wilsoncountymotors.com',
+        siteId: 'wilsoncountymotors',
         isOwnDealership: false,
-        apiUrlNew:  `https://www.wilsoncountymotors.com/${DI_BASE}_NEW:${BASE}`,
-        apiUrlUsed: `https://www.wilsoncountymotors.com/${DI_BASE}_USED:${BASE}`,
-        apiUrlAll:  `https://www.wilsoncountymotors.com/${DI_BASE}_ALL:${BASE}`,
     },
 ];
 
@@ -162,8 +224,6 @@ const HEADERS = {
 //   - firstSeenDate: when a VIN was first scraped
 //   - daysOnLot: calculated each run as (today - firstSeenDate)
 //   - soldVehicles: VINs that disappeared since last run
-//
-// KV Store key format: "vin_history" → { [vin]: { firstSeenDate, dealer, make, model, year, trim } }
 // ─────────────────────────────────────────────────────────────────────────────
 
 const KV_HISTORY_KEY = 'vin_history';
@@ -178,12 +238,11 @@ async function saveVinHistory(kvStore, history) {
 }
 
 function applyDaysInStock(vehicles, vinHistory, today) {
-    const todayStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
+    const todayStr = today.toISOString().split('T')[0];
 
     for (const vehicle of vehicles) {
         if (!vehicle.vin) continue;
 
-        // Get the current price as a number for comparison
         const currentPrice = parseFloat(
             String(vehicle.dealerPrice || vehicle.msrp || '').replace(/[$,]/g, '')
         ) || null;
@@ -191,45 +250,38 @@ function applyDaysInStock(vehicles, vinHistory, today) {
         if (vinHistory[vehicle.vin]) {
             const record = vinHistory[vehicle.vin];
 
-            // ── Days on lot ──
             const firstSeen = new Date(record.firstSeenDate);
             const msOnLot = today - firstSeen;
             vehicle.firstSeenDate = record.firstSeenDate;
             vehicle.daysOnLot = Math.floor(msOnLot / (1000 * 60 * 60 * 24));
 
-            // ── Price history tracking ──
-            const priceHistory = record.priceHistory || [];
-            const lastEntry = priceHistory[priceHistory.length - 1];
-            const lastPrice = lastEntry ? lastEntry.price : null;
-
-            // Only add a new entry if price changed since last run
-            if (currentPrice !== null && currentPrice !== lastPrice) {
-                priceHistory.push({ date: todayStr, price: currentPrice });
-                record.priceHistory = priceHistory;
+            // Price history tracking
+            if (currentPrice && record.priceHistory) {
+                const lastPrice = record.priceHistory[record.priceHistory.length - 1]?.price;
+                if (lastPrice !== currentPrice) {
+                    record.priceHistory.push({ date: todayStr, price: currentPrice });
+                }
+                vehicle.priceHistory = record.priceHistory;
+                vehicle.priceDropCount = record.priceHistory.filter((p, i) =>
+                    i > 0 && p.price < record.priceHistory[i - 1].price
+                ).length;
+                vehicle.totalPriceDrop = record.priceHistory.length > 1
+                    ? record.priceHistory[0].price - currentPrice
+                    : 0;
             }
 
-            // Attach price history summary to vehicle record
-            vehicle.priceHistory = priceHistory;
-            vehicle.originalPrice = priceHistory.length > 0 ? priceHistory[0].price : currentPrice;
-            vehicle.currentPrice = currentPrice;
-            vehicle.priceDrop = (vehicle.originalPrice && currentPrice)
-                ? vehicle.originalPrice - currentPrice
-                : 0;
-            vehicle.priceDropCount = priceHistory.length > 1 ? priceHistory.length - 1 : 0;
-            vehicle.lastPriceChangeDate = priceHistory.length > 1
-                ? priceHistory[priceHistory.length - 1].date
-                : null;
-
+            // Update history record
+            vinHistory[vehicle.vin] = {
+                ...record,
+                priceHistory: vehicle.priceHistory || record.priceHistory || [],
+            };
         } else {
-            // New VIN — record today as first seen
+            // First time seeing this VIN
             vehicle.firstSeenDate = todayStr;
             vehicle.daysOnLot = 0;
             vehicle.priceHistory = currentPrice ? [{ date: todayStr, price: currentPrice }] : [];
-            vehicle.originalPrice = currentPrice;
-            vehicle.currentPrice = currentPrice;
-            vehicle.priceDrop = 0;
             vehicle.priceDropCount = 0;
-            vehicle.lastPriceChangeDate = null;
+            vehicle.totalPriceDrop = 0;
 
             vinHistory[vehicle.vin] = {
                 firstSeenDate: todayStr,
@@ -239,11 +291,10 @@ function applyDaysInStock(vehicles, vinHistory, today) {
                 year: vehicle.year,
                 trim: vehicle.trim,
                 condition: vehicle.condition,
-                priceHistory: currentPrice ? [{ date: todayStr, price: currentPrice }] : [],
+                priceHistory: vehicle.priceHistory,
             };
         }
 
-        // Age bucket for easy filtering
         vehicle.ageBucket = getAgeBucket(vehicle.daysOnLot);
     }
 
@@ -267,7 +318,6 @@ function detectSoldVehicles(vinHistory, currentVins, today) {
 
     for (const [vin, record] of Object.entries(vinHistory)) {
         if (!currentVins.has(vin) && !record.soldDate) {
-            // VIN was in history but not in today's scrape — mark as sold
             const firstSeen = new Date(record.firstSeenDate);
             const daysOnLot = Math.floor((today - firstSeen) / (1000 * 60 * 60 * 24));
             const priceHistory = record.priceHistory || [];
@@ -292,7 +342,6 @@ function detectSoldVehicles(vinHistory, currentVins, today) {
                 priceDropCount: priceHistory.length > 1 ? priceHistory.length - 1 : 0,
                 priceHistory,
             });
-            // Mark as sold in history so we don't re-report it
             vinHistory[vin].soldDate = todayStr;
             vinHistory[vin].daysOnLot = daysOnLot;
         }
@@ -302,37 +351,23 @@ function detectSoldVehicles(vinHistory, currentVins, today) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DEALER.COM SCRAPER
-// Uses the undocumented but publicly accessible JSON API endpoint.
-// Paginates through all results using pageStart parameter.
+// DEALER.COM SCRAPER — Uses WIS POST endpoint (the real API the website uses)
+// The WIS endpoint uses "start" parameter (array of strings) for pagination,
+// unlike the legacy GET endpoint which uses "pageStart" but is CDN-cached.
 // ─────────────────────────────────────────────────────────────────────────────
 async function scrapeDealerCom(dealer, input) {
     const rawVehicles = [];
-    const condition = (input.condition || 'new').toLowerCase();
+    const condition = (input.condition || 'all').toLowerCase();
 
-    // Select the correct endpoint(s) based on condition filter.
-    // Each dealer now has apiUrlNew, apiUrlUsed, and apiUrlAll.
-    // Darrell Waltrip has apiUrlAll = null (their ALL endpoint aggregates a dealer group).
-    let endpoints = [];
-    if (condition === 'new') {
-        endpoints = dealer.apiUrlNew ? [{ url: dealer.apiUrlNew, endpointCondition: 'new' }] : [];
-    } else if (condition === 'used') {
-        endpoints = dealer.apiUrlUsed ? [{ url: dealer.apiUrlUsed, endpointCondition: 'used' }] : [];
-    } else {
-        // 'all' — prefer the combined endpoint; fall back to new+used if not available
-        if (dealer.apiUrlAll) {
-            endpoints = [{ url: dealer.apiUrlAll, endpointCondition: 'all' }];
-        } else {
-            if (dealer.apiUrlNew) endpoints.push({ url: dealer.apiUrlNew, endpointCondition: 'new' });
-            if (dealer.apiUrlUsed) endpoints.push({ url: dealer.apiUrlUsed, endpointCondition: 'used' });
-        }
+    const conditions = condition === 'all' ? ['new', 'used'] : [condition];
+
+    for (const cond of conditions) {
+        await scrapeDealerComCondition(dealer, cond, input, rawVehicles);
+        // Polite delay between new and used scrapes
+        if (conditions.length > 1) await new Promise(r => setTimeout(r, 2000));
     }
 
-    for (const ep of endpoints) {
-        await scrapeDealerComEndpoint(dealer, ep.url, input, rawVehicles);
-    }
-
-    // Deduplicate by VIN within this dealer (guards against endpoint overlap)
+    // Deduplicate by VIN
     const seen = new Set();
     const vehicles = [];
     for (const v of rawVehicles) {
@@ -346,61 +381,72 @@ async function scrapeDealerCom(dealer, input) {
         console.log(`[${dealer.name}] Deduplication removed ${rawVehicles.length - vehicles.length} duplicate records`);
     }
 
-    console.log(`[${dealer.name}] Total after all endpoints: ${vehicles.length} vehicles`);
+    console.log(`[${dealer.name}] Total: ${vehicles.length} unique vehicles`);
     return vehicles;
 }
 
-async function scrapeDealerComEndpoint(dealer, apiUrl, input, vehicles) {
-    let pageStart = 0;
+async function scrapeDealerComCondition(dealer, condition, input, vehicles) {
+    let startOffset = 0;
     let totalCount = null;
-    const pageSize = 100; // Request max per page to minimize requests
+    const pageSize = 100;
+    const seenVins = new Set();
 
-    console.log(`[${dealer.name}] Starting Dealer.com scrape from ${apiUrl}...`);
+    console.log(`[${dealer.name}] Scraping ${condition.toUpperCase()} inventory via WIS POST...`);
 
     do {
-        const url = `${apiUrl}?pageSize=${pageSize}&pageStart=${pageStart}`;
-        console.log(`[${dealer.name}] Fetching page starting at ${pageStart}...`);
+        console.log(`[${dealer.name}] Fetching ${condition} vehicles starting at ${startOffset}...`);
 
-        let data;
-        // Use gotScrapingFetch (browser TLS fingerprinting) to bypass Akamai CDN caching.
-        // Plain fetch() causes Akamai to return the same cached page 0 regardless of pageStart.
-        data = await gotScrapingFetch(url, HEADERS);
+        const data = await wisPostFetch(dealer.baseUrl, dealer.siteId, condition, startOffset, pageSize);
 
         if (!data) {
-            console.error(`[${dealer.name}] No data returned (null response) — skipping remaining pages`);
-            break;
-        }
-        if (!data.pageInfo) {
-            console.error(`[${dealer.name}] Unexpected response structure (no pageInfo). Keys: ${Object.keys(data).join(', ')}`);
+            console.error(`[${dealer.name}] No data returned for ${condition} at offset ${startOffset} — stopping`);
             break;
         }
 
-        // Polite delay between pages to avoid triggering rate limits
-        if (pageStart > 0) await new Promise(r => setTimeout(r, 500));
+        if (!data.pageInfo && !data.inventory) {
+            console.error(`[${dealer.name}] Unexpected WIS response structure. Keys: ${Object.keys(data).join(', ')}`);
+            break;
+        }
 
         if (totalCount === null) {
-            totalCount = data.pageInfo.totalCount;
-            console.log(`[${dealer.name}] Total vehicles reported by API: ${totalCount}`);
+            totalCount = data.pageInfo?.totalCount || 0;
+            console.log(`[${dealer.name}] ${condition.toUpperCase()}: API reports ${totalCount} total vehicles`);
         }
 
         const pageVehicles = data.inventory || [];
-        if (pageVehicles.length === 0) break;
+        if (pageVehicles.length === 0) {
+            console.log(`[${dealer.name}] Empty page at offset ${startOffset} — stopping`);
+            break;
+        }
+
+        // Check for page loop (same VINs as before)
+        const newVins = pageVehicles.map(v => v.vin).filter(v => v && !seenVins.has(v));
+        if (newVins.length === 0 && startOffset > 0) {
+            console.log(`[${dealer.name}] All ${pageVehicles.length} vehicles on this page already seen — stopping pagination`);
+            break;
+        }
 
         for (const v of pageVehicles) {
-            const vehicle = parseDealerComVehicle(v, dealer);
-            // Apply general filters from input
+            if (v.vin) seenVins.add(v.vin);
+            const vehicle = parseDealerComVehicle(v, dealer, condition);
             if (shouldInclude(vehicle, input)) {
                 vehicles.push(vehicle);
             }
         }
 
-        pageStart += pageSize;
-    } while (pageStart < totalCount);
+        console.log(`[${dealer.name}] Got ${pageVehicles.length} vehicles (${newVins.length} new). Running total: ${vehicles.length}`);
 
-    console.log(`[${dealer.name}] Endpoint scraped, running total: ${vehicles.length} vehicles`);
+        startOffset += pageSize;
+
+        // Polite delay between pages
+        if (startOffset < totalCount) await new Promise(r => setTimeout(r, 800));
+
+    } while (startOffset < totalCount);
+
+    console.log(`[${dealer.name}] ${condition.toUpperCase()} scrape complete: ${seenVins.size} unique VINs`);
 }
 
-function parseDealerComVehicle(v, dealer) {
+function parseDealerComVehicle(v, dealer, conditionOverride) {
     // Extract attributes array into a flat object
     const attrs = {};
     for (const attr of (v.attributes || [])) {
@@ -429,11 +475,8 @@ function parseDealerComVehicle(v, dealer) {
         dealer: dealer.name,
         isOwnDealership: dealer.isOwnDealership || false,
         platform: 'Dealer.com',
-        // accountId identifies the specific rooftop within a dealer group.
-        // For group-wide endpoints (e.g. Darrell Waltrip), this is the same for all vehicles
-        // because the API does not expose per-rooftop identifiers — filtering must be done by make.
         accountId: v.accountId || null,
-        condition: v.condition || null,
+        condition: conditionOverride || v.condition || null,
         year: v.year || null,
         make: v.make || null,
         model: v.model || null,
@@ -443,21 +486,20 @@ function parseDealerComVehicle(v, dealer) {
         vin: v.vin || null,
         stockNumber: v.stockNumber || null,
         status: parseStatus(v.status),
-        exteriorColor: attrs.exteriorColor || null,
-        interiorColor: attrs.interiorColor || null,
+        exteriorColor: attrs.exteriorColor || attrs.normalExteriorColor || null,
+        interiorColor: attrs.interiorColor || attrs.normalInteriorColor || null,
         engine: attrs.engine || null,
         transmission: attrs.transmission || null,
-        drivetrain: attrs.normalDriveLine || null,
+        drivetrain: attrs.normalDriveLine || attrs.driveLine || null,
         mileage: attrs.odometer || null,
-        mpgCity: attrs.fuelEconomy ? attrs.fuelEconomy.split('/')[0]?.trim() : null,
-        mpgHighway: attrs.fuelEconomy ? attrs.fuelEconomy.split('/')[1]?.trim() : null,
+        mpgCity: attrs.cityMpg || null,
+        mpgHighway: attrs.highwayMpg || null,
         msrp: msrp,
         dealerPrice: dealerPrice || finalPrice,
         primaryPhotoUrl: primaryPhoto,
         photoCount: images.length,
         detailUrl: detailUrl,
         scrapedAt: new Date().toISOString(),
-        // Days in stock fields — populated later by applyDaysInStock()
         firstSeenDate: null,
         daysOnLot: null,
         ageBucket: null,
@@ -465,468 +507,225 @@ function parseDealerComVehicle(v, dealer) {
 }
 
 function parseStatus(statusCode) {
-    // Dealer.com status codes: 1 = On Lot, 7 = In Transit, 2 = On Order
     const statusMap = { 1: 'On Lot', 7: 'In Transit', 2: 'On Order' };
     return statusMap[statusCode] || `Unknown (${statusCode})`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DEALER INSPIRE SCRAPER
-// Carl Black uses Dealer Inspire (WordPress-based platform).
-// Scrapes the inventory listing pages directly via HTML.
+// ALGOLIA SCRAPER (Carl Black Chevrolet)
+// Carl Black uses Dealer Inspire + Algolia search
 // ─────────────────────────────────────────────────────────────────────────────
-async function scrapeDealerInspire(dealer, input) {
+async function scrapeAlgolia(dealer, input) {
+    const { algoliaAppId, algoliaApiKey, algoliaIndex } = dealer;
+    const condition = (input.condition || 'all').toLowerCase();
+    const pageSize = 100;
+    let page = 0;
     const vehicles = [];
-    let page = 1;
-    let hasMore = true;
+    let totalPages = 1;
 
-    // Build base inventory URL with condition filter
-    const condition = input.condition || 'all';
-    let inventoryPath = '/new-vehicles/';
-    if (condition === 'used') inventoryPath = '/used-vehicles/';
-    else if (condition === 'all') inventoryPath = '/all-inventory/';
+    console.log(`[${dealer.name}] Starting Algolia scrape (index: ${algoliaIndex})...`);
 
-    console.log(`[${dealer.name}] Starting Dealer Inspire scrape...`);
+    do {
+        const body = {
+            requests: [{
+                indexName: algoliaIndex,
+                params: new URLSearchParams({
+                    hitsPerPage: pageSize,
+                    page,
+                    ...(condition !== 'all' ? { filters: `type:${condition}` } : {}),
+                }).toString(),
+            }],
+        };
 
-    while (hasMore) {
-        const url = `${dealer.baseUrl}${inventoryPath}?_p=${page}`;
-        console.log(`[${dealer.name}] Fetching page ${page}...`);
-
-        let html;
         try {
-            const response = await fetchWithRetry(url, {
-                headers: { ...HEADERS, 'Accept': 'text/html,application/xhtml+xml' },
-            });
-            html = await response.text();
-        } catch (err) {
-            console.error(`[${dealer.name}] Request failed: ${err.message}`);
-            break;
-        }
+            const response = await fetchWithRetry(
+                `https://${algoliaAppId}-dsn.algolia.net/1/indexes/*/queries`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Algolia-Application-Id': algoliaAppId,
+                        'X-Algolia-API-Key': algoliaApiKey,
+                    },
+                    body: JSON.stringify(body),
+                }
+            );
+            const data = await response.json();
+            const result = data.results?.[0];
+            if (!result) break;
 
-        const $ = cheerio.load(html);
+            totalPages = result.nbPages || 1;
+            console.log(`[${dealer.name}] Algolia page ${page + 1}/${totalPages}: ${result.hits.length} vehicles`);
 
-        // Dealer Inspire vehicle cards
-        const cards = $('.di-vehicle-card, [class*="vehicle-card"], .inventory-listing-item, .vehicle');
-        console.log(`[${dealer.name}] Page ${page}: found ${cards.length} vehicle cards`);
-
-        if (cards.length === 0) {
-            // Try JSON-LD structured data as fallback
-            const jsonLdVehicles = extractJsonLdVehicles($, dealer);
-            if (jsonLdVehicles.length > 0) {
-                for (const v of jsonLdVehicles) {
-                    if (shouldInclude(v, input)) vehicles.push(v);
+            for (const hit of result.hits) {
+                const vehicle = parseAlgoliaVehicle(hit, dealer);
+                if (shouldInclude(vehicle, input)) {
+                    vehicles.push(vehicle);
                 }
             }
-            hasMore = false;
+
+            page++;
+        } catch (err) {
+            console.error(`[${dealer.name}] Algolia error on page ${page}: ${err.message}`);
             break;
         }
+    } while (page < totalPages);
 
-        cards.each((i, el) => {
-            const vehicle = parseDealerInspireCard($, el, dealer);
-            if (vehicle && shouldInclude(vehicle, input)) {
-                vehicles.push(vehicle);
-            }
-        });
-
-        // Check for next page
-        const nextBtn = $('.pagination .next, a[rel="next"], .di-pagination .next');
-        hasMore = nextBtn.length > 0 && page < 50; // Safety cap at 50 pages
-        page++;
-    }
-
-    console.log(`[${dealer.name}] Scraped ${vehicles.length} vehicles (after filters)`);
+    console.log(`[${dealer.name}] Algolia scrape complete: ${vehicles.length} vehicles`);
     return vehicles;
 }
 
-function parseDealerInspireCard($, el, dealer) {
-    const $el = $(el);
-
-    // Extract data attributes (Dealer Inspire stores data in data-* attributes)
-    const dataVin = $el.attr('data-vin') || $el.find('[data-vin]').attr('data-vin');
-    const dataYear = $el.attr('data-year') || $el.find('[data-year]').attr('data-year');
-    const dataMake = $el.attr('data-make') || $el.find('[data-make]').attr('data-make');
-    const dataModel = $el.attr('data-model') || $el.find('[data-model]').attr('data-model');
-    const dataTrim = $el.attr('data-trim') || $el.find('[data-trim]').attr('data-trim');
-    const dataCondition = $el.attr('data-condition') || $el.find('[data-condition]').attr('data-condition');
-    const dataStock = $el.attr('data-stock') || $el.find('[data-stock]').attr('data-stock');
-    const dataPrice = $el.attr('data-price') || $el.find('[data-price]').attr('data-price');
-    const dataMileage = $el.attr('data-mileage') || $el.find('[data-mileage]').attr('data-mileage');
-
-    // Text extraction fallbacks
-    const titleText = $el.find('.vehicle-title, h2, h3, .title').first().text().trim();
-    const priceText = $el.find('.price, .vehicle-price, [class*="price"]').first().text().trim();
-    const linkEl = $el.find('a').first();
-    const href = linkEl.attr('href') || '';
-    const detailUrl = href.startsWith('http') ? href : `${dealer.baseUrl}${href}`;
-    const imgSrc = $el.find('img').first().attr('src') || $el.find('img').first().attr('data-src');
-
-    // Parse price from text if not in data attribute
-    const priceMatch = priceText.match(/\$[\d,]+/);
-    const parsedPrice = dataPrice || (priceMatch ? priceMatch[0] : null);
-
-    // Parse year/make/model from title if data attributes not present
-    let year = dataYear, make = dataMake, model = dataModel;
-    if (!year && titleText) {
-        const titleMatch = titleText.match(/^(\d{4})\s+(\w+)\s+(.+)/);
-        if (titleMatch) {
-            year = titleMatch[1];
-            make = make || titleMatch[2];
-            model = model || titleMatch[3].split(' ')[0];
-        }
-    }
-
-    if (!dataVin && !titleText) return null; // Skip empty cards
-
+function parseAlgoliaVehicle(hit, dealer) {
     return {
         dealer: dealer.name,
         isOwnDealership: dealer.isOwnDealership || false,
-        platform: 'Dealer Inspire',
-        condition: dataCondition || 'New',
-        year: year ? parseInt(year) : null,
-        make: make || null,
-        model: model || null,
-        trim: dataTrim || null,
-        bodyStyle: null,
-        fuelType: null,
-        vin: dataVin || null,
-        stockNumber: dataStock || null,
-        status: 'On Lot',
-        exteriorColor: $el.attr('data-color') || $el.find('[data-color]').attr('data-color') || null,
-        interiorColor: null,
-        engine: null,
-        transmission: null,
-        drivetrain: null,
-        mileage: dataMileage ? `${dataMileage} miles` : null,
-        mpgCity: null,
-        mpgHighway: null,
-        msrp: parsedPrice,
-        dealerPrice: parsedPrice,
-        primaryPhotoUrl: imgSrc || null,
-        photoCount: null,
-        detailUrl: detailUrl,
+        platform: 'Dealer Inspire (Algolia)',
+        accountId: null,
+        condition: hit.type || null,
+        year: hit.year ? parseInt(hit.year) : null,
+        make: hit.make || null,
+        model: hit.model || null,
+        trim: hit.trim || null,
+        bodyStyle: hit.body_style || null,
+        fuelType: hit.fuel_type || null,
+        vin: hit.vin || null,
+        stockNumber: hit.stock_number || null,
+        status: hit.status || 'On Lot',
+        exteriorColor: hit.ext_color_generic || hit.ext_color || null,
+        interiorColor: hit.int_color_generic || hit.int_color || null,
+        engine: hit.engine || null,
+        transmission: hit.transmission || null,
+        drivetrain: hit.drivetrain || null,
+        mileage: hit.miles ? String(hit.miles) : null,
+        mpgCity: hit.city_mpg ? String(hit.city_mpg) : null,
+        mpgHighway: hit.highway_mpg ? String(hit.highway_mpg) : null,
+        msrp: hit.msrp || null,
+        dealerPrice: hit.our_price || hit.msrp || null,
+        primaryPhotoUrl: hit.thumbnail || null,
+        photoCount: hit.photo_count || 0,
+        detailUrl: hit.link ? `${dealer.baseUrl}${hit.link}` : null,
         scrapedAt: new Date().toISOString(),
-        // Days in stock fields — populated later by applyDaysInStock()
         firstSeenDate: null,
         daysOnLot: null,
         ageBucket: null,
     };
 }
 
-function extractJsonLdVehicles($, dealer) {
-    const vehicles = [];
-    $('script[type="application/ld+json"]').each((i, el) => {
-        try {
-            const data = JSON.parse($(el).html());
-            const items = Array.isArray(data) ? data : [data];
-            for (const item of items) {
-                if (item['@type'] === 'Car' || item['@type'] === 'Vehicle') {
-                    vehicles.push({
-                        dealer: dealer.name,
-                        isOwnDealership: dealer.isOwnDealership || false,
-                        platform: 'Dealer Inspire',
-                        condition: item.itemCondition?.includes('New') ? 'New' : 'Used',
-                        year: item.modelDate ? parseInt(item.modelDate) : null,
-                        make: item.brand?.name || null,
-                        model: item.model || null,
-                        trim: null,
-                        bodyStyle: item.bodyType || null,
-                        fuelType: item.fuelType || null,
-                        vin: item.vehicleIdentificationNumber || null,
-                        stockNumber: null,
-                        status: 'On Lot',
-                        exteriorColor: item.color || null,
-                        interiorColor: null,
-                        engine: null,
-                        transmission: item.vehicleTransmission || null,
-                        drivetrain: item.driveWheelConfiguration || null,
-                        mileage: item.mileageFromOdometer?.value ? `${item.mileageFromOdometer.value} miles` : null,
-                        mpgCity: null,
-                        mpgHighway: null,
-                        msrp: item.offers?.price ? `$${item.offers.price}` : null,
-                        dealerPrice: item.offers?.price ? `$${item.offers.price}` : null,
-                        primaryPhotoUrl: item.image || null,
-                        photoCount: null,
-                        detailUrl: item.url || null,
-                        scrapedAt: new Date().toISOString(),
-                        firstSeenDate: null,
-                        daysOnLot: null,
-                        ageBucket: null,
-                    });
-                }
-            }
-        } catch (e) {
-            // Skip malformed JSON-LD
-        }
-    });
-    return vehicles;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// FILTER LOGIC
+// FILTER HELPER
 // ─────────────────────────────────────────────────────────────────────────────
 function shouldInclude(vehicle, input) {
-    if (input.condition && input.condition !== 'all') {
-        const cond = (vehicle.condition || '').toLowerCase();
-        if (input.condition === 'new' && cond !== 'new') return false;
-        if (input.condition === 'used' && cond === 'new') return false;
-    }
-    if (input.make) {
-        if ((vehicle.make || '').toLowerCase() !== input.make.toLowerCase()) return false;
-    }
-    if (input.model) {
-        if (!(vehicle.model || '').toLowerCase().includes(input.model.toLowerCase())) return false;
-    }
-    if (input.minYear) {
-        if (!vehicle.year || vehicle.year < input.minYear) return false;
-    }
-    if (input.maxYear) {
-        if (!vehicle.year || vehicle.year > input.maxYear) return false;
-    }
-    if (input.maxPrice) {
-        const price = parseFloat((vehicle.dealerPrice || vehicle.msrp || '').replace(/[$,]/g, ''));
-        if (!isNaN(price) && price > input.maxPrice) return false;
-    }
-    if (input.minPrice) {
-        const price = parseFloat((vehicle.dealerPrice || vehicle.msrp || '').replace(/[$,]/g, ''));
-        if (!isNaN(price) && price < input.minPrice) return false;
-    }
+    if (input.make && vehicle.make?.toLowerCase() !== input.make.toLowerCase()) return false;
+    if (input.model && !vehicle.model?.toLowerCase().includes(input.model.toLowerCase())) return false;
+    if (input.minYear && vehicle.year < input.minYear) return false;
+    if (input.maxYear && vehicle.year > input.maxYear) return false;
     return true;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ALGOLIA SCRAPER (Dealer Inspire + Algolia platform)
-// Used by: Carl Black Chevrolet Nashville
-// ─────────────────────────────────────────────────────────────────────────────
-async function scrapeAlgolia(dealer, input) {
-    const { algoliaAppId, algoliaApiKey, algoliaIndex } = dealer;
-    const url = `https://${algoliaAppId}-dsn.algolia.net/1/indexes/${algoliaIndex}/query`;
-    const headers = {
-        'X-Algolia-Application-Id': algoliaAppId,
-        'X-Algolia-API-Key': algoliaApiKey,
-        'Content-Type': 'application/json',
-    };
-
-    const vehicles = [];
-    const seenVins = new Set();
-
-    // Fetch new and used separately for clean condition tagging
-    for (const condition of ['New', 'Used']) {
-        let page = 0;
-        let totalPages = 1;
-        console.log(`[${dealer.name}] Fetching ${condition} vehicles from Algolia...`);
-
-        do {
-            const body = JSON.stringify({
-                query: '',
-                hitsPerPage: 100,
-                page,
-                filters: `type:${condition}`,
-            });
-            const r = await fetchWithRetry(url, { method: 'POST', headers, body });
-            const data = await r.json();
-
-            if (page === 0) {
-                totalPages = data.nbPages || 1;
-                console.log(`[${dealer.name}] ${condition}: ${data.nbHits} total vehicles, ${totalPages} pages`);
-            }
-
-            for (const hit of (data.hits || [])) {
-                const vin = hit.vin || hit.VIN || '';
-                if (vin && seenVins.has(vin)) continue;
-                if (vin) seenVins.add(vin);
-
-                const msrp = hit.msrp ? `$${Number(hit.msrp).toLocaleString()}` : null;
-                const price = hit.our_price ? `$${Number(hit.our_price).toLocaleString()}` : msrp;
-
-                const vehicle = {
-                    dealer: dealer.name,
-                    isOwnDealership: dealer.isOwnDealership || false,
-                    platform: 'Dealer Inspire (Algolia)',
-                    accountId: algoliaIndex,
-                    condition,
-                    year: hit.year ? parseInt(hit.year) : null,
-                    make: hit.make || '',
-                    model: hit.model || '',
-                    trim: hit.trim || '',
-                    bodyStyle: hit.body || '',
-                    fuelType: hit.fuel_type || '',
-                    vin,
-                    stockNumber: hit.stock || '',
-                    status: hit.intransit_filter || 'On Lot',
-                    exteriorColor: hit.ext_color || '',
-                    interiorColor: hit.int_color || '',
-                    engine: hit.engine || null,
-                    transmission: hit.transmission || null,
-                    drivetrain: hit.drivetrain || null,
-                    mileage: hit.mileage ? parseInt(hit.mileage) : null,
-                    mpgCity: null,
-                    mpgHighway: null,
-                    msrp,
-                    dealerPrice: price,
-                    primaryPhotoUrl: hit.image || null,
-                    photoCount: null,
-                    detailUrl: hit.link ? `${dealer.baseUrl}${hit.link}` : null,
-                    scrapedAt: new Date().toISOString(),
-                };
-
-                if (shouldInclude(vehicle, input)) vehicles.push(vehicle);
-            }
-
-            page++;
-        } while (page < totalPages);
-    }
-
-    console.log(`[${dealer.name}] Algolia scrape complete: ${vehicles.length} unique vehicles`);
-    return vehicles;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN ENTRY POINT
 // ─────────────────────────────────────────────────────────────────────────────
-await Actor.init();
+Actor.main(async () => {
+    const input = await Actor.getInput() || {};
+    const condition = input.condition || 'all';
+    const dealerFilter = input.dealer || null;
 
-// Initialize proxy configuration for IP rotation
-// Uses Apify residential proxies to rotate IPs per Dealer.com page request,
-// preventing Akamai from rate-limiting sequential pages from the same IP.
-try {
-    proxyConfig = await Actor.createProxyConfiguration({
-        groups: ['RESIDENTIAL'],
-        countryCode: 'US',
-    });
-    console.log('Proxy configuration initialized: RESIDENTIAL US proxies enabled');
-} catch (err) {
-    console.warn(`Proxy configuration failed (may not be available on this plan): ${err.message}`);
-    console.warn('Continuing without proxy rotation — pagination may be limited by rate limiting');
-    proxyConfig = null;
-}
+    console.log('=== Freeland Dealer Intelligence Scraper ===');
+    console.log(`Condition: ${condition} | Dealer filter: ${dealerFilter || 'all'}`);
 
-const input = await Actor.getInput() || {};
-
-// Which dealers to scrape (default: all)
-const targetDealers = (input.dealers && input.dealers.length > 0)
-    ? DEALERS.filter(d => input.dealers.some(name => d.name.toLowerCase().includes(name.toLowerCase())))
-    : DEALERS;
-
-console.log('Target dealers:', targetDealers.map(d => `${d.name} (isOwn=${d.isOwnDealership})`).join(', '));
-
-console.log(`Scraping ${targetDealers.length} dealer(s)...`);
-console.log(`Filters: condition=${input.condition || 'all'}, make=${input.make || 'any'}, model=${input.model || 'any'}`);
-
-// Open persistent KV store for days-in-stock tracking
-const kvStore = await Actor.openKeyValueStore('vin-history');
-const vinHistory = await loadVinHistory(kvStore);
-const today = new Date();
-const todayStr = today.toISOString().split('T')[0];
-console.log(`Loaded VIN history: ${Object.keys(vinHistory).length} VINs tracked so far`);
-
-const inventoryDataset = await Actor.openDataset('inventory');
-const soldDataset = await Actor.openDataset('sold-vehicles');
-
-// Clear the inventory dataset at the start of each run so we always have a
-// clean snapshot. Without this, every run appends to the previous run's data,
-// causing records to accumulate and vehicle counts to grow unboundedly.
-// The sold-vehicles dataset is intentionally NOT cleared — it is a running log.
-console.log('Clearing inventory dataset for fresh run...');
-await inventoryDataset.drop();
-const freshInventoryDataset = await Actor.openDataset('inventory');
-console.log('Inventory dataset cleared.');
-
-let totalSaved = 0;
-const allCurrentVins = new Set();
-const dealerResults = {}; // Track per-dealer results for summary
-
-// ── Scrape all dealers ──
-for (const dealer of targetDealers) {
-    let vehicles = [];
-    dealerResults[dealer.name] = { count: 0, error: null, isOwn: dealer.isOwnDealership };
-
-    // Polite delay between dealers to avoid triggering Akamai rate limiting across domains
-    if (targetDealers.indexOf(dealer) > 0) {
-        console.log(`Waiting 3s before scraping next dealer...`);
-        await new Promise(r => setTimeout(r, 3000));
-    }
-
+    // Initialize proxy configuration for IP rotation
     try {
-        if (dealer.platform === 'dealer_com') {
-            vehicles = await scrapeDealerCom(dealer, input);
-        } else if (dealer.platform === 'dealer_inspire') {
-            vehicles = await scrapeDealerInspire(dealer, input);
-        } else if (dealer.platform === 'algolia') {
-            vehicles = await scrapeAlgolia(dealer, input);
-        }
-    } catch (err) {
-        console.error(`[${dealer.name}] Fatal error: ${err.message}`);
-        dealerResults[dealer.name].error = err.message;
-    }
-
-    // ── Post-fetch make filter (for dealer groups with shared used inventory endpoints) ──
-    // The Dealer.com API does not support rooftop-level filtering via URL parameters.
-    // For dealers like Darrell Waltrip whose _USED endpoint returns the entire auto group
-    // (Honda, Toyota, Audi, etc.), we filter to only the brands sold at this specific store.
-    if (dealer.usedMakeFilter && vehicles.length > 0) {
-        const before = vehicles.length;
-        const allowed = dealer.usedMakeFilter.map(m => m.toLowerCase());
-        vehicles = vehicles.filter(v => {
-            const cond = (v.condition || '').toLowerCase();
-            if (cond === 'new') return true; // Never filter new vehicles by make
-            return allowed.includes((v.make || '').toLowerCase());
+        proxyConfig = await Actor.createProxyConfiguration({
+            groups: ['RESIDENTIAL'],
+            countryCode: 'US',
         });
-        const removed = before - vehicles.length;
-        if (removed > 0) {
-            console.log(`[${dealer.name}] Make filter: removed ${removed} non-${dealer.usedMakeFilter.join('/')} used vehicles (${before} → ${vehicles.length})`);
+        console.log('Proxy configuration initialized: RESIDENTIAL US proxies enabled');
+    } catch (err) {
+        console.warn(`Proxy configuration failed (may need Apify Scale plan): ${err.message}`);
+        console.warn('Continuing without proxy rotation — pagination may be limited by CDN rate limiting');
+        proxyConfig = null;
+    }
+
+    // Initialize KV store for VIN history tracking
+    const kvStore = await Actor.openKeyValueStore('inventory-tracker');
+    const vinHistory = await loadVinHistory(kvStore);
+    console.log(`Loaded VIN history: ${Object.keys(vinHistory).length} tracked VINs`);
+
+    // Open (and clear) the named inventory dataset for a clean snapshot each run
+    const inventoryDataset = await Actor.openDataset('inventory');
+    await inventoryDataset.drop();
+    const freshInventoryDataset = await Actor.openDataset('inventory');
+    console.log('Cleared inventory dataset for fresh run');
+
+    const soldDataset = await Actor.openDataset('sold-vehicles');
+
+    const today = new Date();
+    const allVehicles = [];
+    const dealerSummary = [];
+
+    const dealersToScrape = dealerFilter
+        ? DEALERS.filter(d => d.name.toLowerCase().includes(dealerFilter.toLowerCase()))
+        : DEALERS;
+
+    for (const dealer of dealersToScrape) {
+        console.log(`\n--- Scraping ${dealer.name} (${dealer.platform}) ---`);
+        const startTime = Date.now();
+
+        let vehicles = [];
+        try {
+            if (dealer.platform === 'dealer_com') {
+                vehicles = await scrapeDealerCom(dealer, { condition });
+            } else if (dealer.platform === 'algolia') {
+                vehicles = await scrapeAlgolia(dealer, { condition });
+            } else {
+                console.warn(`[${dealer.name}] Unknown platform: ${dealer.platform}`);
+                continue;
+            }
+        } catch (err) {
+            console.error(`[${dealer.name}] Scrape failed: ${err.message}`);
+            dealerSummary.push({ dealer: dealer.name, count: 0, error: err.message });
+            continue;
+        }
+
+        // Apply days-in-stock tracking
+        vehicles = applyDaysInStock(vehicles, vinHistory, today);
+
+        allVehicles.push(...vehicles);
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        dealerSummary.push({ dealer: dealer.name, count: vehicles.length, elapsed: `${elapsed}s` });
+        console.log(`[${dealer.name}] Done: ${vehicles.length} vehicles in ${elapsed}s`);
+
+        // Polite delay between dealers
+        if (dealersToScrape.indexOf(dealer) < dealersToScrape.length - 1) {
+            await new Promise(r => setTimeout(r, 3000));
         }
     }
 
-    // Track all VINs seen this run
-    for (const v of vehicles) {
-        if (v.vin) allCurrentVins.add(v.vin);
+    // Save all vehicles to the inventory dataset
+    if (allVehicles.length > 0) {
+        await freshInventoryDataset.pushData(allVehicles);
+        console.log(`\nSaved ${allVehicles.length} vehicles to inventory dataset`);
     }
 
-    // Apply days-in-stock calculations
-    vehicles = applyDaysInStock(vehicles, vinHistory, today);
-
-    if (vehicles.length > 0) {
-        await freshInventoryDataset.pushData(vehicles);
-        totalSaved += vehicles.length;
-        dealerResults[dealer.name].count = vehicles.length;
-        const avgDays = vehicles
-            .filter(v => v.daysOnLot !== null)
-            .reduce((sum, v, _, arr) => sum + v.daysOnLot / arr.length, 0);
-        const ownCount = vehicles.filter(v => v.isOwnDealership).length;
-        console.log(`[${dealer.name}] Saved ${vehicles.length} vehicles | isOwn=${dealer.isOwnDealership} | ownTagged=${ownCount} | Avg days on lot: ${Math.round(avgDays)}`);
-    } else {
-        console.warn(`[${dealer.name}] WARNING: 0 vehicles scraped! isOwn=${dealer.isOwnDealership}`);
-    }
-}
-
-// ── Detect sold/removed vehicles ──
-if (Object.keys(vinHistory).length > 0) {
-    const soldVehicles = detectSoldVehicles(vinHistory, allCurrentVins, today);
+    // Detect and save sold vehicles
+    const currentVins = new Set(allVehicles.map(v => v.vin).filter(Boolean));
+    const soldVehicles = detectSoldVehicles(vinHistory, currentVins, today);
     if (soldVehicles.length > 0) {
         await soldDataset.pushData(soldVehicles);
-        console.log(`\nDetected ${soldVehicles.length} sold/removed vehicles since last run`);
-        for (const sv of soldVehicles.slice(0, 10)) {
-            console.log(`  SOLD: [${sv.dealer}] ${sv.year} ${sv.make} ${sv.model} ${sv.trim || ''} — ${sv.daysOnLot} days on lot`);
-        }
-    } else {
-        console.log('\nNo vehicles sold/removed since last run (or this is the first run)');
+        console.log(`Detected ${soldVehicles.length} sold/removed vehicles`);
     }
-}
 
-// ── Save updated VIN history ──
-await saveVinHistory(kvStore, vinHistory);
-console.log(`VIN history updated: ${Object.keys(vinHistory).length} total VINs tracked`);
+    // Save updated VIN history
+    await saveVinHistory(kvStore, vinHistory);
 
-console.log(`\n═══════════════════════════════════════`);
-console.log(`Run complete: ${todayStr}`);
-console.log(`Total vehicles saved: ${totalSaved}`);
-console.log(`Total VINs in history: ${Object.keys(vinHistory).length}`);
-console.log('\nPer-dealer summary:');
-for (const [name, result] of Object.entries(dealerResults)) {
-    const status = result.error ? `ERROR: ${result.error}` : `${result.count} vehicles`;
-    const ownFlag = result.isOwn ? ' [OWN DEALERSHIP]' : '';
-    console.log(`  ${name}${ownFlag}: ${status}`);
-}
-console.log(`═══════════════════════════════════════`);
-
-await Actor.exit();
+    // Print summary table
+    console.log('\n=== RUN SUMMARY ===');
+    console.log('Dealer'.padEnd(45) + 'Vehicles'.padEnd(12) + 'Time');
+    console.log('-'.repeat(65));
+    for (const s of dealerSummary) {
+        const status = s.error ? `ERROR: ${s.error.slice(0, 30)}` : s.elapsed;
+        console.log(s.dealer.padEnd(45) + String(s.count).padEnd(12) + status);
+    }
+    console.log('-'.repeat(65));
+    console.log('TOTAL'.padEnd(45) + String(allVehicles.length));
+});
