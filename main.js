@@ -690,6 +690,12 @@ Actor.main(async () => {
         // Apply days-in-stock tracking
         vehicles = applyDaysInStock(vehicles, vinHistory, today);
 
+        // Save incrementally — push each dealer's data immediately so a timeout doesn't lose it
+        if (vehicles.length > 0) {
+            await freshInventoryDataset.pushData(vehicles);
+            console.log(`[${dealer.name}] Saved ${vehicles.length} vehicles to dataset`);
+        }
+
         allVehicles.push(...vehicles);
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         dealerSummary.push({ dealer: dealer.name, count: vehicles.length, elapsed: `${elapsed}s` });
@@ -701,11 +707,8 @@ Actor.main(async () => {
         }
     }
 
-    // Save all vehicles to the inventory dataset
-    if (allVehicles.length > 0) {
-        await freshInventoryDataset.pushData(allVehicles);
-        console.log(`\nSaved ${allVehicles.length} vehicles to inventory dataset`);
-    }
+    // All vehicles already saved incrementally above
+    console.log(`\nTotal vehicles saved: ${allVehicles.length}`);
 
     // Detect and save sold vehicles
     const currentVins = new Set(allVehicles.map(v => v.vin).filter(Boolean));
