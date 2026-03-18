@@ -677,11 +677,12 @@ Actor.main(async () => {
     const vinHistory = await loadVinHistory(kvStore);
     console.log(`Loaded VIN history: ${Object.keys(vinHistory).length} tracked VINs`);
 
-    // Open (and clear) the named inventory dataset for a clean snapshot each run
-    const inventoryDataset = await Actor.openDataset('inventory');
-    await inventoryDataset.drop();
-    const freshInventoryDataset = await Actor.openDataset('inventory');
-    console.log('Cleared inventory dataset for fresh run');
+    // Open the named inventory dataset
+    // We keep the same named dataset across runs (no drop/delete) to preserve the dataset ID.
+    // The dashboard deduplicates by VIN keeping the latest record, so accumulation is safe.
+    // Each run pushes fresh data; the dashboard always picks the most recent record per VIN.
+    const inventoryDs = await Actor.openDataset('inventory');
+    console.log('Opened inventory dataset for this run');
 
     const soldDataset = await Actor.openDataset('sold-vehicles');
 
@@ -718,7 +719,7 @@ Actor.main(async () => {
 
         // Save incrementally — push each dealer's data immediately so a timeout doesn't lose it
         if (vehicles.length > 0) {
-            await freshInventoryDataset.pushData(vehicles);
+            await inventoryDs.pushData(vehicles);
             console.log(`[${dealer.name}] Saved ${vehicles.length} vehicles to dataset`);
         }
 
