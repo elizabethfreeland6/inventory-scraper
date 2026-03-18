@@ -603,7 +603,7 @@ function parseAlgoliaVehicle(hit, dealer) {
         dealerPrice: hit.our_price || hit.msrp || null,
         primaryPhotoUrl: hit.thumbnail || null,
         photoCount: hit.photo_count || 0,
-        detailUrl: hit.link ? `${dealer.baseUrl}${hit.link}` : null,
+        detailUrl: hit.link ? (hit.link.startsWith('http') ? hit.link : `${dealer.baseUrl}${hit.link}`) : null,
         scrapedAt: new Date().toISOString(),
         firstSeenDate: null,
         daysOnLot: null,
