@@ -21,6 +21,12 @@ const DI_BASE = 'apis/widget/INVENTORY_LISTING_DEFAULT_AUTO';
 
 const DEALERS = [
     {
+        name: 'Freeland Chevrolet',
+        baseUrl: 'https://www.freelandchevrolet.com',
+        inventoryApiUrl: `https://www.freelandchevrolet.com/${DI_BASE}_NEW:${BASE}`,
+        platform: 'dealer_com',
+    },
+    {
         name: 'Walker Chevrolet',
         baseUrl: 'https://www.walkerchevrolet.com',
         inventoryApiUrl: `https://www.walkerchevrolet.com/${DI_BASE}_NEW:${BASE}`,
@@ -39,9 +45,9 @@ const DEALERS = [
         platform: 'dealer_com',
     },
     {
-        name: 'Darrell Waltrip Buick GMC',
-        baseUrl: 'https://www.darrellwaltripbuickgmc.com',
-        inventoryApiUrl: `https://www.darrellwaltripbuickgmc.com/${DI_BASE}_NEW:${BASE}`,
+        name: 'Wilson County Chevrolet Buick GMC',
+        baseUrl: 'https://www.wilsoncountychevrolet.com',
+        inventoryApiUrl: `https://www.wilsoncountychevrolet.com/${DI_BASE}_NEW:${BASE}`,
         platform: 'dealer_com',
     },
     {
