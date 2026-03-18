@@ -253,7 +253,12 @@ function applyDaysInStock(vehicles, vinHistory, today) {
             const firstSeen = new Date(record.firstSeenDate);
             const msOnLot = today - firstSeen;
             vehicle.firstSeenDate = record.firstSeenDate;
-            vehicle.daysOnLot = Math.floor(msOnLot / (1000 * 60 * 60 * 24));
+            // Use dealer's own daysOnLot if available (from DMS/WIS API) — it's more accurate
+            // than our tracking which only counts days since first scrape
+            const trackedDays = Math.floor(msOnLot / (1000 * 60 * 60 * 24));
+            vehicle.daysOnLot = (vehicle.dealerDaysOnLot != null && vehicle.dealerDaysOnLot > 0)
+                ? vehicle.dealerDaysOnLot
+                : trackedDays;
 
             // Price history tracking
             if (currentPrice && record.priceHistory) {
@@ -278,7 +283,10 @@ function applyDaysInStock(vehicles, vinHistory, today) {
         } else {
             // First time seeing this VIN
             vehicle.firstSeenDate = todayStr;
-            vehicle.daysOnLot = 0;
+            // Use dealer's own daysOnLot if available, otherwise 0 (we just started tracking)
+            vehicle.daysOnLot = (vehicle.dealerDaysOnLot != null && vehicle.dealerDaysOnLot > 0)
+                ? vehicle.dealerDaysOnLot
+                : 0;
             vehicle.priceHistory = currentPrice ? [{ date: todayStr, price: currentPrice }] : [];
             vehicle.priceDropCount = 0;
             vehicle.totalPriceDrop = 0;
@@ -513,6 +521,9 @@ function parseDealerComVehicle(v, dealer, conditionOverride) {
         detailUrl: detailUrl,
         scrapedAt: new Date().toISOString(),
         firstSeenDate: null,
+        // dealerDaysOnLot: the dealer's own reported days-on-lot from WIS API
+        // This is the authoritative value from the dealer's DMS system
+        dealerDaysOnLot: attrs.daysOnLot != null ? parseInt(attrs.daysOnLot, 10) || null : null,
         daysOnLot: null,
         ageBucket: null,
     };
@@ -618,6 +629,9 @@ function parseAlgoliaVehicle(hit, dealer) {
         detailUrl: hit.link ? (hit.link.startsWith('http') ? hit.link : `${dealer.baseUrl}${hit.link}`) : null,
         scrapedAt: new Date().toISOString(),
         firstSeenDate: null,
+        // Algolia may include days_on_lot or age field
+        dealerDaysOnLot: hit.days_on_lot != null ? parseInt(hit.days_on_lot, 10) || null
+            : hit.age != null ? parseInt(hit.age, 10) || null : null,
         daysOnLot: null,
         ageBucket: null,
     };
