@@ -464,8 +464,20 @@ function parseDealerComVehicle(v, dealer, conditionOverride) {
     }
 
     // Build detail page URL
+    // v.link is often empty for WIS dealers; fall back to VIN-filtered search URL
     const detailPath = v.link || '';
-    const detailUrl = detailPath.startsWith('http') ? detailPath : `${dealer.baseUrl}${detailPath}`;
+    let detailUrl;
+    if (detailPath.startsWith('http')) {
+        detailUrl = detailPath;
+    } else if (detailPath && detailPath !== '/') {
+        detailUrl = `${dealer.baseUrl}${detailPath}`;
+    } else if (v.vin) {
+        // Use VIN-filtered inventory search URL — works on all Dealer.com sites
+        const conditionSlug = (conditionOverride || v.condition || 'new').toLowerCase() === 'used' ? 'used-inventory' : 'new-inventory';
+        detailUrl = `${dealer.baseUrl}/${conditionSlug}/index.htm?vin=${v.vin}`;
+    } else {
+        detailUrl = dealer.baseUrl;
+    }
 
     // Primary photo
     const images = v.images || [];
