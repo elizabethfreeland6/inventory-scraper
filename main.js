@@ -663,11 +663,13 @@ Actor.main(async () => {
     const vinHistory = await loadVinHistory(kvStore);
     console.log(`Loaded VIN history: ${Object.keys(vinHistory).length} tracked VINs`);
 
-    // Open (and clear) the named inventory dataset for a clean snapshot each run
-    const inventoryDataset = await Actor.openDataset('inventory');
-    await inventoryDataset.drop();
+    // Open the named inventory dataset
+    // IMPORTANT: Do NOT call .drop() here — it deletes the dataset object and invalidates
+    // the ID, causing all subsequent pushData() calls to fail with 404.
+    // The dashboard deduplicates by VIN keeping the latest record per run, so
+    // accumulating records across runs is safe and expected.
     const freshInventoryDataset = await Actor.openDataset('inventory');
-    console.log('Cleared inventory dataset for fresh run');
+    console.log('Opened inventory dataset for this run');
 
     const soldDataset = await Actor.openDataset('sold-vehicles');
 
