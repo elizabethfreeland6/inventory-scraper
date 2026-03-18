@@ -521,27 +521,9 @@ function parseDealerComVehicle(v, dealer, conditionOverride) {
         detailUrl: detailUrl,
         scrapedAt: new Date().toISOString(),
         firstSeenDate: null,
-        // dealerDaysOnLot: computed from inventoryDate (when vehicle arrived at dealer)
-        // inventoryDate is more reliably populated than daysOnLot in the WIS attributes
-        // Falls back to attrs.daysOnLot if inventoryDate is not available
-        dealerDaysOnLot: (() => {
-            // Try inventoryDate first (e.g. '2025-11-15' or '11/15/2025')
-            const invDate = attrs.inventoryDate;
-            if (invDate) {
-                const d = new Date(invDate);
-                if (!isNaN(d.getTime())) {
-                    const days = Math.floor((Date.now() - d.getTime()) / (1000 * 60 * 60 * 24));
-                    if (days >= 0 && days < 3650) return days; // sanity check: 0-10 years
-                }
-            }
-            // Fall back to attrs.daysOnLot
-            const attrDays = attrs.daysOnLot;
-            if (attrDays != null) {
-                const d = parseInt(attrDays, 10);
-                if (!isNaN(d) && d > 0) return d;
-            }
-            return null;
-        })(),
+        // dealerDaysOnLot: the dealer's own reported days-on-lot from WIS API
+        // This is the authoritative value from the dealer's DMS system
+        dealerDaysOnLot: attrs.daysOnLot != null ? parseInt(attrs.daysOnLot, 10) || null : null,
         daysOnLot: null,
         ageBucket: null,
     };
