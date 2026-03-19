@@ -230,7 +230,24 @@ const KV_HISTORY_KEY = 'vin_history';
 
 async function loadVinHistory(kvStore) {
     const history = await kvStore.getValue(KV_HISTORY_KEY);
-    return history || {};
+    if (!history) return {};
+
+    // Migration: backfill lastSeenDate for records that predate this field.
+    // Without lastSeenDate, the sold-detection guard would treat all old records
+    // as stale and never flag them as sold. We set lastSeenDate = firstSeenDate
+    // as a conservative default — the next run will update it to today if the
+    // vehicle is still active.
+    let migrated = 0;
+    for (const [vin, record] of Object.entries(history)) {
+        if (!record.lastSeenDate && record.firstSeenDate) {
+            record.lastSeenDate = record.firstSeenDate;
+            migrated++;
+        }
+    }
+    if (migrated > 0) {
+        console.log(`[VIN history] Backfilled lastSeenDate on ${migrated} legacy records`);
+    }
+    return history;
 }
 
 async function saveVinHistory(kvStore, history) {
@@ -270,9 +287,11 @@ function applyDaysInStock(vehicles, vinHistory, today) {
                     : 0;
             }
 
-            // Update history record
+            // Update history record — always stamp lastSeenDate so sold detection
+            // only fires for VINs actively tracked in recent runs
             vinHistory[vehicle.vin] = {
                 ...record,
+                lastSeenDate: todayStr,
                 priceHistory: vehicle.priceHistory || record.priceHistory || [],
             };
         } else {
@@ -285,6 +304,7 @@ function applyDaysInStock(vehicles, vinHistory, today) {
 
             vinHistory[vehicle.vin] = {
                 firstSeenDate: todayStr,
+                lastSeenDate: todayStr,
                 dealer: vehicle.dealer,
                 make: vehicle.make,
                 model: vehicle.model,
@@ -316,8 +336,18 @@ function detectSoldVehicles(vinHistory, currentVins, today) {
     const todayStr = today.toISOString().split('T')[0];
     const soldVehicles = [];
 
+    // Only consider a VIN as "sold" if it was actively seen in the last 3 days.
+    // This prevents historical VINs (from before the named dataset era, or from
+    // scraper runs that covered different dealers) from being falsely flagged.
+    const threeDaysAgo = new Date(today);
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+    const threeDaysAgoStr = threeDaysAgo.toISOString().split('T')[0];
+
     for (const [vin, record] of Object.entries(vinHistory)) {
-        if (!currentVins.has(vin) && !record.soldDate) {
+        // Skip if already marked sold, or if it was never seen recently (stale history)
+        const lastSeen = record.lastSeenDate || record.firstSeenDate;
+        const wasRecentlyActive = lastSeen && lastSeen >= threeDaysAgoStr;
+        if (!currentVins.has(vin) && !record.soldDate && wasRecentlyActive) {
             const firstSeen = new Date(record.firstSeenDate);
             const daysOnLot = Math.floor((today - firstSeen) / (1000 * 60 * 60 * 24));
             const priceHistory = record.priceHistory || [];
