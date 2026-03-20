@@ -272,10 +272,10 @@ function applyDaysInStock(vehicles, vinHistory, today) {
             vehicle.firstSeenDate = record.firstSeenDate;
             vehicle.daysOnLot = Math.floor(msOnLot / (1000 * 60 * 60 * 24));
 
-            // Price history tracking
+            // Price history tracking — record every day's price (not just changes)
             if (currentPrice && record.priceHistory) {
-                const lastPrice = record.priceHistory[record.priceHistory.length - 1]?.price;
-                if (lastPrice !== currentPrice) {
+                const alreadyRecordedToday = record.priceHistory.some(p => p.date === todayStr);
+                if (!alreadyRecordedToday) {
                     record.priceHistory.push({ date: todayStr, price: currentPrice });
                 }
                 vehicle.priceHistory = record.priceHistory;
