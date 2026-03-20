@@ -1,11 +1,10 @@
 import { Actor } from 'apify';
 import * as cheerio from 'cheerio';
-import OpenAI from 'openai';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEALER DISCLOSURE SCRAPER
 // Visits a sample of vehicle detail pages for each competitor dealer,
-// extracts all disclosure/fine print text, and uses GPT to parse out:
+// extracts all disclosure/fine print text, and uses an LLM to parse out:
 //   - Documentation fee
 //   - Market adjustments / dealer add-ons
 //   - Financing rates disclosed
@@ -14,6 +13,7 @@ import OpenAI from 'openai';
 //   - Full raw disclaimer text
 //
 // Runs weekly (fees don't change daily). Results stored in 'dealer-disclosures' dataset.
+// Uses Manus Forge API (OpenAI-compatible) — no external OpenAI key required.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BASE = 'inventory-data-bus1/getInventory';
@@ -191,14 +191,14 @@ async function scrapeDisclosureText(dealer, pageInfo) {
         url: pageInfo.url,
         vin: pageInfo.vin,
         model: pageInfo.model,
-        rawDisclosureText: combinedText.slice(0, 8000), // Cap at 8k chars for GPT
+        rawDisclosureText: combinedText.slice(0, 8000), // Cap at 8k chars for LLM
     };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 3: Use GPT to parse structured fee data from raw disclosure text
+// STEP 3: Use Manus Forge API (OpenAI-compatible) to parse structured fee data
 // ─────────────────────────────────────────────────────────────────────────────
-async function parseDisclosuresWithGPT(dealer, rawTexts, openai) {
+async function parseDisclosuresWithLLM(dealer, rawTexts, forgeApiUrl, forgeApiKey) {
     const combinedRaw = rawTexts
         .filter(Boolean)
         .map(t => t.rawDisclosureText)
@@ -209,7 +209,7 @@ async function parseDisclosuresWithGPT(dealer, rawTexts, openai) {
         return null;
     }
 
-    console.log(`[${dealer.name}] Sending ${combinedRaw.length} chars to GPT for parsing...`);
+    console.log(`[${dealer.name}] Sending ${combinedRaw.length} chars to LLM for parsing...`);
 
     const prompt = `You are analyzing car dealership disclosure text scraped from their website. 
 Extract the following structured information. If a field is not mentioned, use null.
@@ -237,20 +237,31 @@ Extract and return a JSON object with these fields:
 Return ONLY valid JSON, no markdown, no explanation.`;
 
     try {
-        const completion = await openai.chat.completions.create({
-            model: 'gpt-4.1-mini',
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.1,
-            max_tokens: 1000,
+        const response = await fetch(`${forgeApiUrl}/v1/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${forgeApiKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.1,
+                max_tokens: 1000,
+            }),
         });
 
-        const content = completion.choices[0].message.content.trim();
+        if (!response.ok) {
+            throw new Error(`Forge API HTTP ${response.status}: ${await response.text()}`);
+        }
+
+        const data = await response.json();
+        const content = data.choices[0].message.content.trim();
         // Strip markdown code blocks if present
         const jsonStr = content.replace(/^```json?\n?/, '').replace(/\n?```$/, '');
         return JSON.parse(jsonStr);
     } catch (err) {
-        console.error(`[${dealer.name}] GPT parsing failed: ${err.message}`);
-        return { rawSummary: 'GPT parsing failed — see rawDisclosureText', error: err.message };
+        console.error(`[${dealer.name}] LLM parsing failed: ${err.message}`);
+        return { rawSummary: 'LLM parsing failed — see rawDisclosureText', error: err.message };
     }
 }
 
@@ -260,15 +271,16 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 await Actor.init();
 
 const input = await Actor.getInput() || {};
-const openaiApiKey = input.openaiApiKey || process.env.OPENAI_API_KEY;
 
-if (!openaiApiKey) {
-    console.error('ERROR: No OpenAI API key provided. Set OPENAI_API_KEY in environment variables or pass via input.');
+// Manus Forge API credentials — set as Apify actor environment variables
+const forgeApiUrl = process.env.FORGE_API_URL || 'https://forge.manus.ai';
+const forgeApiKey = process.env.FORGE_API_KEY;
+
+if (!forgeApiKey) {
+    console.error('ERROR: No Forge API key provided. Set FORGE_API_KEY in actor environment variables.');
     await Actor.exit();
     process.exit(1);
 }
-
-const openai = new OpenAI({ apiKey: openaiApiKey });
 
 // Which dealers to scrape (default: all)
 const targetDealers = (input.dealers && input.dealers.length > 0)
@@ -279,7 +291,7 @@ const dataset = await Actor.openDataset('dealer-disclosures');
 const scrapedAt = new Date().toISOString();
 const scrapedDate = scrapedAt.split('T')[0];
 
-console.log(`\nDealer Disclosure Scraper`);
+console.log(`\nDealer Disclosure Scraper (Manus Forge API)`);
 console.log(`Date: ${scrapedDate}`);
 console.log(`Scraping ${targetDealers.length} dealer(s), ${PAGES_TO_SAMPLE} pages each\n`);
 
@@ -303,8 +315,8 @@ for (const dealer of targetDealers) {
         await new Promise(r => setTimeout(r, 1500)); // Polite delay between requests
     }
 
-    // Step 3: Parse with GPT
-    const parsed = await parseDisclosuresWithGPT(dealer, rawTexts, openai);
+    // Step 3: Parse with LLM
+    const parsed = await parseDisclosuresWithLLM(dealer, rawTexts, forgeApiUrl, forgeApiKey);
 
     // Step 4: Save to dataset
     const record = {
